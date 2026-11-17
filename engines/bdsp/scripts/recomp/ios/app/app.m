@@ -1,0 +1,932 @@
+// iPadOS shell of the BDSP recompilation (memory model A-low): UIKit window with CAMetalLayer, touch gamepad, GameController, hardware keyboard,
+// paths (Documents), save import, measurement lines. The runtime runs on a thread of its own (bdsp_runtime_main = main.c with -Dmain=...).
+// PCM sound through Audio Queue Services and AVAudioSession. Own code.
+#import <AVFAudio/AVFAudio.h>
+#import <GameController/GameController.h>
+#import <QuartzCore/CAMetalLayer.h>
+#import <UIKit/UIKit.h>
+#import <os/proc.h>
+#include <CommonCrypto/CommonDigest.h>
+#include <mach/mach.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <signal.h>
+#include <execinfo.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/sysctl.h>
+#import <Metal/Metal.h>
+#import "../../app/icon_variants.h"
+#import "data_manager.h"
+#include <strings.h>
+#include "../../runtime/mods.h"
+#include "../../runtime/pad_gc.h"
+#include "../../runtime/swkbd_ui.h"
+
+static BOOL sceneActive;   // state of the scene, set by SceneDelegate
+
+static void ApplyAppIcon(void) {
+    static BOOL pending;
+    UIApplication *app = UIApplication.sharedApplication;
+    if (pending || !app.supportsAlternateIcons || !sceneActive) return;
+    NSDictionary *icons = BDSPReadIcons(NSBundle.mainBundle.resourcePath);
+    NSDictionary *variant = BDSPFindIcon(icons, BDSPIconSelection(icons));
+    if (!variant) return;
+    NSString *name = [variant[@"icon"] isEqual:icons[@"primary_icon"]] ? nil : variant[@"icon"];
+    if ((!name && !app.alternateIconName) || [name isEqualToString:app.alternateIconName]) return;
+    pending = YES;
+    [app setAlternateIconName:name completionHandler:^(NSError *error) {
+        if (error) fprintf(stderr, "[icon] Icon change failed: %s\n", error.localizedDescription.UTF8String);
+        dispatch_async(dispatch_get_main_queue(), ^{ pending = NO; });
+    }];
+}
+
+extern int bdsp_runtime_main(int argc, char **argv);
+#ifndef BDSP_STUB
+extern int bdsp_guest_window_error;
+extern void audio_output_set_active(int active);
+#else
+static void audio_output_set_active(int active) { (void)active; }
+static int bdsp_guest_window_error;
+#endif
+extern void bdsp_set_fps(int fps);   // services_gfx.c: 30, 60 or 120
+extern CAMetalLayer *g_ios_layer;
+
+static double FootprintMiB(void);
+static BOOL audioInterrupted;
+
+static void SetAudioActive(BOOL active) {
+    AVAudioSession *session = AVAudioSession.sharedInstance;
+    NSError *error = nil;
+    // Quiesce queues before deactivating the session. Guest completion keeps its clock.
+    if (!active) audio_output_set_active(0);
+    if (![session setActive:active error:&error]) {
+        audio_output_set_active(0);
+        fprintf(stderr, "[ipad-audio] Session: %s\n", error.localizedDescription.UTF8String);
+        return;
+    }
+    if (active) audio_output_set_active(1);
+}
+
+static void ConfigureAudioSession(void) {
+    NSError *error = nil;
+    if (![AVAudioSession.sharedInstance setCategory:AVAudioSessionCategoryPlayback
+                                              mode:AVAudioSessionModeDefault options:0 error:&error]) {
+        fprintf(stderr, "[ipad-audio] Kategorie: %s\n", error.localizedDescription.UTF8String);
+        audio_output_set_active(0);
+        return;
+    }
+    SetAudioActive(sceneActive && !audioInterrupted);
+}
+#ifdef BDSP_STUB
+// Probe build (deploy_ios.sh build-stub): without runtime and guest code; reports device data and checks the 4 GiB window on the device.
+#import <Metal/Metal.h>
+#include <sys/mman.h>
+CAMetalLayer *g_ios_layer;
+int bdsp_runtime_main(int argc, char **argv) {
+    id<MTLDevice> d = MTLCreateSystemDefaultDevice();
+    fprintf(stderr, "[probe] Metal %s, BC-Texturen %d, ASTC %d, maxBufferLength %llu MiB, recommendedMaxWorkingSetSize %llu MiB, hasUnifiedMemory %d, Apple9 %d\n",
+            d.name.UTF8String, (int)d.supportsBCTextureCompression, (int)[d supportsFamily:MTLGPUFamilyApple4],
+            (unsigned long long)(d.maxBufferLength >> 20), (unsigned long long)(d.recommendedMaxWorkingSetSize >> 20), (int)d.hasUnifiedMemory,
+            (int)[d supportsFamily:MTLGPUFamilyApple9]);
+    fprintf(stderr, "[probe] os_proc_available_memory %zu MiB\n", os_proc_available_memory() >> 20);
+    size_t sizes[] = {4096ull << 20, 5200ull << 20, 6000ull << 20, 12800ull << 20};
+    for (int i = 0; i < 4; i++) {
+        void *p = mmap(NULL, sizes[i], PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        fprintf(stderr, "[probe] mmap %zu MiB anonymous: %s (%p)\n", sizes[i] >> 20, p == MAP_FAILED ? "ERROR" : "ok", p);
+        if (p != MAP_FAILED) {
+            void *b = NULL;
+            if (sizes[i] <= (4096ull << 20) + (1ull << 30)) {
+                id<MTLBuffer> mb = [d newBufferWithBytesNoCopy:p length:sizes[i] options:MTLResourceStorageModeShared deallocator:nil];
+                b = (__bridge void *)mb;
+                fprintf(stderr, "[probe]   Metal buffer around %zu MiB: %s\n", sizes[i] >> 20, mb ? "ok" : "ERROR");
+            }
+            (void)b;
+            memset(p, 1, 256ull << 20);   // 256 MiB wirklich anfassen
+            fprintf(stderr, "[probe]   256 MiB beschrieben, Footprint %.0f MiB, frei %zu MiB\n", FootprintMiB(), os_proc_available_memory() >> 20);
+            munmap(p, sizes[i]);
+        }
+    }
+    for (;;) sleep(60);
+}
+#endif
+
+#define BIT(b) (1ull << (b))
+
+// Touch gamepad and hardware keyboard are input sources (input.h); the controllers are merged by pad_gc.h
+static _Atomic uint64_t g_touch_mask, g_key_mask;
+static void publish_buttons(void) {
+    PadState t = {.buttons = atomic_load(&g_touch_mask)}, k = {.buttons = atomic_load(&g_key_mask)};
+    input_source_set(INPUT_SRC_TOUCH, &t);
+    input_source_set(INPUT_SRC_KEYBOARD, &k);
+}
+static void SwkbdShowNative(void);   // system keyboard for the text field of the on-screen keyboard (below)
+
+#pragma mark - Paths, save
+
+static NSString *Documents(void) { return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject; }
+
+static NSString *Sha256(NSData *d) {
+    unsigned char h[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(d.bytes, (CC_LONG)d.length, h);
+    NSMutableString *s = [NSMutableString string];
+    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) [s appendFormat:@"%02x", h[i]];
+    return s;
+}
+
+// Save imports are confirmed and verified by data_manager; no drop file is
+// allowed to replace a live save automatically.
+
+#pragma mark - Measurement lines
+
+static double FootprintMiB(void) {
+    task_vm_info_data_t v;
+    mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&v, &n) != KERN_SUCCESS) return -1;
+    return v.phys_footprint / 1048576.0;
+}
+
+// BDSP_PROBE_FIXED=1 (diagnostic, off by default): device data (memory, cores, GPU features) and the question whether a fixed window of
+// 12.5 GiB can be reserved at a chosen address. Prints one line per candidate and ends the app. The result decides whether guest address
+// == host address (memory model A-low) is possible on a device, and whether the GPU can run the game at all (BC textures, buffer size).
+static long SysctlLong(const char *name) {
+    int64_t v = 0;
+    size_t n = sizeof v;
+    return sysctlbyname(name, &v, &n, NULL, 0) == 0 ? (long)v : -1;
+}
+
+static void ProbeFixedWindows(void) {
+    id<MTLDevice> d = MTLCreateSystemDefaultDevice();
+    fprintf(stderr, "[probe-fixed] device %s, RAM %ld MiB, CPU cores %ld (performance %ld, efficiency %ld)\n", d.name.UTF8String,
+            SysctlLong("hw.memsize") >> 20, SysctlLong("hw.physicalcpu"), SysctlLong("hw.perflevel0.physicalcpu"), SysctlLong("hw.perflevel1.physicalcpu"));
+    fprintf(stderr, "[probe-fixed] GPU: BC textures %d, maxBufferLength %llu MiB, recommendedMaxWorkingSetSize %llu MiB, Apple7 %d, Apple8 %d, Apple9 %d\n",
+            (int)d.supportsBCTextureCompression, (unsigned long long)(d.maxBufferLength >> 20),
+            (unsigned long long)(d.recommendedMaxWorkingSetSize >> 20), (int)[d supportsFamily:MTLGPUFamilyApple7],
+            (int)[d supportsFamily:MTLGPUFamilyApple8], (int)[d supportsFamily:MTLGPUFamilyApple9]);
+    static const vm_address_t cand[] = {0x100000000ull, 0x200000000ull, 0x300000000ull, 0x400000000ull, 0x500000000ull, 0x600000000ull,
+                                        0x700000000ull, 0x800000000ull, 0x900000000ull, 0xA00000000ull, 0xC00000000ull,
+                                        0x1000000000ull, 0x2000000000ull, 0x7000000000ull};
+    fprintf(stderr, "[probe-fixed] os_proc_available_memory %zu MiB\n", os_proc_available_memory() >> 20);
+    for (size_t i = 0; i < 2 * (sizeof cand / sizeof *cand); i++) {   // first the compact window of model A-low (4 GiB), then the Mac-sized one
+        const vm_size_t size = (i < sizeof cand / sizeof *cand ? 4096ull : 12800ull) << 20;
+        vm_address_t a = cand[i % (sizeof cand / sizeof *cand)];
+        kern_return_t kr = vm_allocate(mach_task_self(), &a, size, VM_FLAGS_FIXED);
+        fprintf(stderr, "[probe-fixed] %#llx + %llu MiB: %s (kr %d)\n", (unsigned long long)cand[i % (sizeof cand / sizeof *cand)], (unsigned long long)(size >> 20),
+                kr == KERN_SUCCESS ? "ok" : "ERROR", kr);
+        if (kr == KERN_SUCCESS) {
+            memset((void *)a, 1, 64ull << 20);   // really touch some pages
+            vm_deallocate(mach_task_self(), a, size);
+        }
+    }
+    fprintf(stderr, "[probe-fixed] done\n");
+    exit(0);
+}
+
+static void *StatsLoop(void *arg) {
+    (void)arg;
+    pthread_setname_np("bdsp-stats");
+    NSTimeInterval t0 = NSProcessInfo.processInfo.systemUptime;
+    for (;;) {
+        sleep(5);
+        fprintf(stderr, "[ipad] t=%.0f s Footprint %.0f MiB, free per os_proc_available_memory %zu MiB, thermalState %ld, lowPower %d\n",
+                NSProcessInfo.processInfo.systemUptime - t0, FootprintMiB(), os_proc_available_memory() >> 20,
+                (long)NSProcessInfo.processInfo.thermalState, (int)NSProcessInfo.processInfo.lowPowerModeEnabled);
+        if (getenv("BDSP_AUDIO_PROBE")) {
+            AVAudioSession *s = AVAudioSession.sharedInstance;
+            fprintf(stderr, "[ipad-audio] category %s, other audio playing %d, volume %.2f\n", s.category.UTF8String,
+                    (int)s.isOtherAudioPlaying, s.outputVolume);
+        }
+    }
+    return NULL;
+}
+
+#pragma mark - Spielansicht
+
+@interface GameView : UIView
+@property(nonatomic, strong) NSMutableArray<CALayer *> *pads;
+@property(nonatomic) CGPoint dpadC, abxyC;
+@property(nonatomic) CGFloat dpadR, btnR, btnOff;
+@property(nonatomic) CGRect lRect, rRect, zlRect, zrRect, minusRect, plusRect;
+@property(nonatomic) BOOL overlayHidden;
+@end
+
+@implementation GameView
++ (Class)layerClass { return CAMetalLayer.class; }
+
+- (instancetype)initWithFrame:(CGRect)f {
+    if ((self = [super initWithFrame:f])) {
+        self.multipleTouchEnabled = YES;
+        self.backgroundColor = UIColor.blackColor;
+        CAMetalLayer *l = (CAMetalLayer *)self.layer;
+        l.opaque = YES;
+        g_ios_layer = l;
+    }
+    return self;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CAMetalLayer *l = (CAMetalLayer *)self.layer;
+    CGFloat sc = self.traitCollection.displayScale;
+    l.contentsScale = sc;
+    l.drawableSize = CGSizeMake(self.bounds.size.width * sc, self.bounds.size.height * sc);
+    CGRect b = self.bounds;
+    UIEdgeInsets sa = self.safeAreaInsets;
+    CGFloat m = 28, s = MIN(b.size.width, b.size.height);
+    self.dpadR = s * 0.15;
+    self.btnR = s * 0.055;
+    self.btnOff = s * 0.095;
+    self.dpadC = CGPointMake(sa.left + m + self.dpadR * 1.2, b.size.height - sa.bottom - m - self.dpadR * 1.2);
+    self.abxyC = CGPointMake(b.size.width - sa.right - m - self.btnOff - self.btnR * 1.2, b.size.height - sa.bottom - m - self.btnOff - self.btnR * 1.2);
+    CGFloat pw = s * 0.17, ph = s * 0.06;
+    self.lRect = CGRectMake(sa.left + m, sa.top + m, pw, ph);
+    self.zlRect = CGRectMake(sa.left + m, sa.top + m + ph + 10, pw, ph);
+    self.rRect = CGRectMake(b.size.width - sa.right - m - pw, sa.top + m, pw, ph);
+    self.zrRect = CGRectMake(b.size.width - sa.right - m - pw, sa.top + m + ph + 10, pw, ph);
+    CGFloat cx = b.size.width / 2, by = b.size.height - sa.bottom - m - ph / 2;
+    self.minusRect = CGRectMake(cx - 20 - pw * 0.5, by - ph / 2, pw * 0.5, ph);
+    self.plusRect = CGRectMake(cx + 20, by - ph / 2, pw * 0.5, ph);
+    [self buildOverlay];
+}
+
+- (void)addShape:(UIBezierPath *)p fill:(CGFloat)a {
+    CAShapeLayer *s = [CAShapeLayer layer];
+    s.path = p.CGPath;
+    s.fillColor = [UIColor colorWithWhite:1 alpha:a].CGColor;
+    s.strokeColor = [UIColor colorWithWhite:1 alpha:0.5].CGColor;
+    s.lineWidth = 2;
+    [self.layer addSublayer:s];
+    [self.pads addObject:s];
+}
+
+- (void)addLabel:(NSString *)t at:(CGPoint)c size:(CGFloat)sz {
+    CATextLayer *tl = [CATextLayer layer];
+    tl.string = t;
+    tl.fontSize = sz;
+    tl.alignmentMode = kCAAlignmentCenter;
+    tl.foregroundColor = [UIColor colorWithWhite:1 alpha:0.8].CGColor;
+    tl.contentsScale = self.traitCollection.displayScale;
+    tl.frame = CGRectMake(c.x - 40, c.y - sz * 0.6, 80, sz * 1.3);
+    [self.layer addSublayer:tl];
+    [self.pads addObject:(CAShapeLayer *)tl];
+}
+
+- (void)buildOverlay {
+    for (CALayer *l in self.pads) [l removeFromSuperlayer];
+    self.pads = [NSMutableArray array];
+    if (self.overlayHidden) return;
+    CGFloat r = self.dpadR, w = r * 0.62;
+    UIBezierPath *cross = [UIBezierPath bezierPath];
+    CGPoint c = self.dpadC;
+    [cross appendPath:[UIBezierPath bezierPathWithRoundedRect:CGRectMake(c.x - r, c.y - w / 2, 2 * r, w) cornerRadius:w / 4]];
+    [cross appendPath:[UIBezierPath bezierPathWithRoundedRect:CGRectMake(c.x - w / 2, c.y - r, w, 2 * r) cornerRadius:w / 4]];
+    [self addShape:cross fill:0.12];
+    struct { NSString *n; CGFloat dx, dy; } bt[4] = {{@"A", 1, 0}, {@"B", 0, 1}, {@"X", 0, -1}, {@"Y", -1, 0}};
+    for (int i = 0; i < 4; i++) {
+        CGPoint p = CGPointMake(self.abxyC.x + bt[i].dx * self.btnOff, self.abxyC.y + bt[i].dy * self.btnOff);
+        [self addShape:[UIBezierPath bezierPathWithOvalInRect:CGRectMake(p.x - self.btnR, p.y - self.btnR, 2 * self.btnR, 2 * self.btnR)] fill:0.12];
+        [self addLabel:bt[i].n at:p size:self.btnR * 0.9];
+    }
+    struct { CGRect r; NSString *n; } pl[6] = {{self.lRect, @"L"}, {self.rRect, @"R"}, {self.zlRect, @"ZL"}, {self.zrRect, @"ZR"}, {self.minusRect, @"−"}, {self.plusRect, @"+"}};
+    for (int i = 0; i < 6; i++) {
+        [self addShape:[UIBezierPath bezierPathWithRoundedRect:pl[i].r cornerRadius:pl[i].r.size.height / 2] fill:0.12];
+        [self addLabel:pl[i].n at:CGPointMake(CGRectGetMidX(pl[i].r), CGRectGetMidY(pl[i].r)) size:pl[i].r.size.height * 0.5];
+    }
+}
+
+- (uint64_t)maskForPoint:(CGPoint)p {
+    uint64_t m = 0;
+    CGFloat dx = p.x - self.dpadC.x, dy = p.y - self.dpadC.y, d = hypot(dx, dy);
+    if (d > self.dpadR * 0.25 && d < self.dpadR * 1.6) {
+        if (dx < -0.38 * d) m |= BIT(PB_LEFT);
+        if (dx > 0.38 * d) m |= BIT(PB_RIGHT);
+        if (dy < -0.38 * d) m |= BIT(PB_UP);
+        if (dy > 0.38 * d) m |= BIT(PB_DOWN);
+    }
+    struct { int bit; CGFloat dx, dy; } bt[4] = {{PB_A, 1, 0}, {PB_B, 0, 1}, {PB_X, 0, -1}, {PB_Y, -1, 0}};
+    for (int i = 0; i < 4; i++)
+        if (hypot(p.x - (self.abxyC.x + bt[i].dx * self.btnOff), p.y - (self.abxyC.y + bt[i].dy * self.btnOff)) < self.btnR * 1.25) m |= BIT(bt[i].bit);
+    struct { int bit; CGRect r; } pl[6] = {{PB_L, self.lRect}, {PB_R, self.rRect}, {PB_ZL, self.zlRect}, {PB_ZR, self.zrRect}, {PB_MINUS, self.minusRect}, {PB_PLUS, self.plusRect}};
+    for (int i = 0; i < 6; i++)
+        if (CGRectContainsPoint(CGRectInset(pl[i].r, -14, -14), p)) m |= BIT(pl[i].bit);
+    return m;
+}
+
+- (void)updateTouches:(NSSet<UITouch *> *)all ending:(NSSet<UITouch *> *)ending {
+    uint64_t m = 0;
+    for (UITouch *t in all) {
+        if ([ending containsObject:t] || t.phase == UITouchPhaseEnded || t.phase == UITouchPhaseCancelled) continue;
+        m |= [self maskForPoint:[t locationInView:self]];
+    }
+    atomic_store(&g_touch_mask, m);
+    publish_buttons();
+}
+// While the on-screen keyboard is open a touch goes to it (a key, or the text field, which brings up the system keyboard), not to the game
+// phase: 1 began, 0 ended, -1 cancelled (a moving finger changes nothing until it is lifted)
+- (BOOL)swkbdTouches:(NSSet<UITouch *> *)t phase:(int)phase {
+    if (!swkbd_ui_active()) return NO;
+    CGPoint p = [t.anyObject locationInView:self];
+    float nx = (float)(p.x / self.bounds.size.width), ny = (float)(p.y / self.bounds.size.height);
+    if (phase == 1 && swkbd_ui_field_hit(nx, ny)) SwkbdShowNative(); else if (phase != 2) swkbd_ui_touch(phase, nx, ny);
+    return YES;
+}
+- (void)touchesBegan:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e { if ([self swkbdTouches:t phase:1]) return; [self updateTouches:e.allTouches ending:nil]; }
+- (void)touchesMoved:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e { if ([self swkbdTouches:t phase:2]) return; [self updateTouches:e.allTouches ending:nil]; }
+- (void)touchesEnded:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e { if ([self swkbdTouches:t phase:0]) return; [self updateTouches:e.allTouches ending:t]; }
+- (void)touchesCancelled:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e { if ([self swkbdTouches:t phase:-1]) return; [self updateTouches:e.allTouches ending:t]; }
+@end
+
+#pragma mark - Controller, Tastatur
+
+static void BindController(GCController *c) {
+    pad_gc_bind(c);
+    pad_gc_update();
+}
+
+static int KeyBit(UIKeyboardHIDUsage k) {
+    switch (k) {
+    case UIKeyboardHIDUsageKeyboardReturnOrEnter: case UIKeyboardHIDUsageKeyboardSpacebar: case UIKeyboardHIDUsageKeyboardK: return PB_A;
+    case UIKeyboardHIDUsageKeyboardDeleteOrBackspace: case UIKeyboardHIDUsageKeyboardJ: return PB_B;
+    case UIKeyboardHIDUsageKeyboardX: return PB_X;
+    case UIKeyboardHIDUsageKeyboardY: return PB_Y;
+    case UIKeyboardHIDUsageKeyboardQ: return PB_L;
+    case UIKeyboardHIDUsageKeyboardE: return PB_R;
+    case UIKeyboardHIDUsageKeyboardP: return PB_PLUS;
+    case UIKeyboardHIDUsageKeyboardO: return PB_MINUS;
+    case UIKeyboardHIDUsageKeyboardLeftArrow: case UIKeyboardHIDUsageKeyboardA: return PB_LEFT;
+    case UIKeyboardHIDUsageKeyboardRightArrow: case UIKeyboardHIDUsageKeyboardD: return PB_RIGHT;
+    case UIKeyboardHIDUsageKeyboardUpArrow: case UIKeyboardHIDUsageKeyboardW: return PB_UP;
+    case UIKeyboardHIDUsageKeyboardDownArrow: case UIKeyboardHIDUsageKeyboardS: return PB_DOWN;
+    default: return -1;
+    }
+}
+
+static GameView *gView;   // game view of the scene (controller overlay)
+
+#import "../../app/shader_status.h"
+
+static void InstallShaderStatus(void) {
+    BDSPInstallShaderStatus(^(NSString *text) {
+        static UILabel *label;
+        if (!text) { label.hidden = YES; return; }
+        if (!label) {
+            label = [UILabel new]; label.translatesAutoresizingMaskIntoConstraints = NO;
+            label.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.9];
+            label.textColor = UIColor.whiteColor; label.textAlignment = NSTextAlignmentCenter;
+            label.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+            label.layer.cornerRadius = 12; label.clipsToBounds = YES;
+            label.accessibilityTraits = UIAccessibilityTraitUpdatesFrequently;
+            [gView addSubview:label];
+            [NSLayoutConstraint activateConstraints:@[
+                [label.centerXAnchor constraintEqualToAnchor:gView.centerXAnchor],
+                [label.topAnchor constraintEqualToAnchor:gView.safeAreaLayoutGuide.topAnchor constant:12],
+                [label.widthAnchor constraintLessThanOrEqualToAnchor:gView.widthAnchor constant:-32],
+                [label.heightAnchor constraintEqualToConstant:40],
+                [label.widthAnchor constraintGreaterThanOrEqualToConstant:260]]];
+        }
+        label.text = [NSString stringWithFormat:@"  %@  ", text];
+        label.hidden = NO; [gView bringSubviewToFront:label];
+    });
+}
+
+#pragma mark - Screen keyboard (text entry)
+
+// Without complete firmware fonts/layouts UIKit owns the prompt, editing and IME.
+// With them the Horizon keyboard is exclusive; no UIKit keyboard is opened.
+@interface SwkbdNativeField : NSObject <UITextFieldDelegate>
+- (void)valueChanged:(UITextField *)field;
+@end
+static UITextField *gNativeField;
+static UIView *gNativeCard;
+static UILabel *gNativePrompt;
+static SwkbdNativeField *gNativeDelegate;
+@implementation SwkbdNativeField
+- (void)valueChanged:(UITextField *)field {
+    if (!field.markedTextRange) swkbd_ui_replace_text(field.text.UTF8String);
+}
+- (BOOL)textFieldShouldReturn:(UITextField *)field {
+    if (!field.markedTextRange) { swkbd_ui_replace_text(field.text.UTF8String); swkbd_ui_key(SWKBD_KEY_ENTER); }
+    return NO;
+}
+@end
+
+static void SwkbdShowNative(void) {
+    SwkbdNativeState state;
+    if (!swkbd_ui_native_state(&state)) return;
+    if (!gNativeCard) {
+        gNativeCard = [UIView new]; gNativeCard.translatesAutoresizingMaskIntoConstraints = NO;
+        gNativeCard.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
+        gNativeCard.layer.cornerRadius = 16;
+        gNativePrompt = [UILabel new]; gNativePrompt.translatesAutoresizingMaskIntoConstraints = NO;
+        gNativePrompt.textColor = UIColor.whiteColor; gNativePrompt.numberOfLines = 2;
+        gNativePrompt.font = [UIFont systemFontOfSize:18 weight:UIFontWeightMedium];
+        gNativeDelegate = [SwkbdNativeField new];
+        gNativeField = [UITextField new]; gNativeField.translatesAutoresizingMaskIntoConstraints = NO;
+        gNativeField.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+        gNativeField.borderStyle = UITextBorderStyleRoundedRect;
+        gNativeField.font = [UIFont systemFontOfSize:18]; gNativeField.delegate = gNativeDelegate;
+        gNativeField.autocorrectionType = UITextAutocorrectionTypeNo;
+        gNativeField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        gNativeField.returnKeyType = UIReturnKeyDone;
+        [gNativeField addTarget:gNativeDelegate action:@selector(valueChanged:) forControlEvents:UIControlEventEditingChanged];
+        [gNativeCard addSubview:gNativePrompt]; [gNativeCard addSubview:gNativeField]; [gView addSubview:gNativeCard];
+        NSLayoutConstraint *preferredWidth = [gNativeCard.widthAnchor constraintEqualToConstant:560];
+        preferredWidth.priority = UILayoutPriorityDefaultHigh; preferredWidth.active = YES;
+        [NSLayoutConstraint activateConstraints:@[
+            [gNativeCard.centerXAnchor constraintEqualToAnchor:gView.centerXAnchor],
+            [gNativeCard.widthAnchor constraintLessThanOrEqualToAnchor:gView.widthAnchor multiplier:0.85],
+            [gNativeCard.widthAnchor constraintGreaterThanOrEqualToConstant:280],
+            [gNativeCard.widthAnchor constraintLessThanOrEqualToConstant:560],
+            [gNativeCard.bottomAnchor constraintEqualToAnchor:gView.keyboardLayoutGuide.topAnchor constant:-12],
+            [gNativeCard.topAnchor constraintGreaterThanOrEqualToAnchor:gView.safeAreaLayoutGuide.topAnchor constant:8],
+            [gNativePrompt.leadingAnchor constraintEqualToAnchor:gNativeCard.leadingAnchor constant:16],
+            [gNativePrompt.trailingAnchor constraintEqualToAnchor:gNativeCard.trailingAnchor constant:-16],
+            [gNativePrompt.topAnchor constraintEqualToAnchor:gNativeCard.topAnchor constant:12],
+            [gNativeField.topAnchor constraintEqualToAnchor:gNativePrompt.bottomAnchor constant:10],
+            [gNativeField.leadingAnchor constraintEqualToAnchor:gNativePrompt.leadingAnchor],
+            [gNativeField.trailingAnchor constraintEqualToAnchor:gNativePrompt.trailingAnchor],
+            [gNativeField.heightAnchor constraintEqualToConstant:42],
+            [gNativeField.bottomAnchor constraintEqualToAnchor:gNativeCard.bottomAnchor constant:-12]]];
+    }
+    NSString *(^string)(const char *) = ^NSString *(const char *s) { return [NSString stringWithUTF8String:s] ?: @""; };
+    NSString *prompt = string(state.params.header);
+    if (!prompt.length) prompt = string(state.params.sub);
+    if (!prompt.length) prompt = string(state.params.guide);
+    gNativePrompt.text = state.message[0] ? string(state.message) : prompt;
+    NSString *guide = string(state.params.guide);
+    gNativeField.placeholder = [guide isEqualToString:prompt] ? nil : guide;
+    BOOL secure = state.params.password != 0;
+    if (gNativeField.secureTextEntry != secure) gNativeField.secureTextEntry = secure;
+    UIKeyboardType type = state.params.mode == 1 ? UIKeyboardTypeNumbersAndPunctuation : UIKeyboardTypeDefault;
+    if (gNativeField.keyboardType != type) gNativeField.keyboardType = type;
+    gNativeField.enabled = !state.busy;
+    NSString *text = string(state.text);
+    if (!gNativeField.markedTextRange && ![gNativeField.text isEqualToString:text]) gNativeField.text = text;
+    BOOL opening = gNativeCard.hidden || !gNativeField.isFirstResponder;
+    gNativeCard.hidden = NO; [gView bringSubviewToFront:gNativeCard];
+    if (opening && !state.busy) [gNativeField becomeFirstResponder];
+}
+
+static void SwkbdHideNative(void) {
+    if (gNativeField.isFirstResponder) {
+        [gNativeField resignFirstResponder];
+        [gView.window.rootViewController becomeFirstResponder];
+    }
+    gNativeCard.hidden = YES;
+}
+
+static void SwkbdPoll(void) {
+    static BOOL was;
+    BOOL on = swkbd_ui_active() != 0;
+    if (on != was) {
+        was = on;
+        for (CALayer *layer in gView.pads) layer.hidden = on;
+        publish_buttons(); input_tick();
+    }
+    if (on && swkbd_ui_native_state(NULL)) SwkbdShowNative();
+    else SwkbdHideNative();
+}
+
+static BOOL SwkbdPresses(NSSet<UIPress *> *presses) {
+    if (swkbd_ui_native_state(NULL)) return NO;
+    BOOL handled = NO;
+    for (UIPress *p in presses) {
+        UIKey *k = p.key;
+        if (!k) continue;
+        handled = YES;
+        switch (k.keyCode) {
+        case UIKeyboardHIDUsageKeyboardDeleteOrBackspace: swkbd_ui_key(SWKBD_KEY_BACKSPACE); continue;
+        case UIKeyboardHIDUsageKeyboardDeleteForward: swkbd_ui_key(SWKBD_KEY_DELETE); continue;
+        case UIKeyboardHIDUsageKeyboardReturnOrEnter: case UIKeyboardHIDUsageKeypadEnter: swkbd_ui_key(SWKBD_KEY_ENTER); continue;
+        case UIKeyboardHIDUsageKeyboardEscape: swkbd_ui_key(SWKBD_KEY_ESCAPE); continue;
+        case UIKeyboardHIDUsageKeyboardLeftArrow: swkbd_ui_key(SWKBD_KEY_LEFT); continue;
+        case UIKeyboardHIDUsageKeyboardRightArrow: swkbd_ui_key(SWKBD_KEY_RIGHT); continue;
+        case UIKeyboardHIDUsageKeyboardHome: swkbd_ui_key(SWKBD_KEY_HOME); continue;
+        case UIKeyboardHIDUsageKeyboardEnd: swkbd_ui_key(SWKBD_KEY_END); continue;
+        default: break;
+        }
+        if (k.modifierFlags & (UIKeyModifierCommand | UIKeyModifierControl)) continue;
+        NSString *c = k.characters;
+        unichar first = c.length ? [c characterAtIndex:0] : 0;
+        if (first >= 0x20 && !(first >= 0xF700 && first <= 0xF8FF)) swkbd_ui_text(c.UTF8String);   // not the function key codes of UIKit
+    }
+    return handled;
+}
+
+#pragma mark - App
+
+
+@interface SceneDelegate : UIResponder <UIWindowSceneDelegate>
+@property(nonatomic, strong) UIWindow *window;
+- (void)startRuntime;
+@end
+
+@interface GameVC : UIViewController
+@end
+
+@implementation GameVC
+- (void)loadView { gView = [[GameView alloc] initWithFrame:CGRectZero]; self.view = gView; }
+- (BOOL)prefersStatusBarHidden { return YES; }
+- (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+- (BOOL)canBecomeFirstResponder { return YES; }
+- (void)viewDidAppear:(BOOL)a {
+    [super viewDidAppear:a];
+    [self becomeFirstResponder];
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        InstallShaderStatus();
+        [(SceneDelegate *)self.view.window.windowScene.delegate startRuntime];
+        [NSTimer scheduledTimerWithTimeInterval:0.15 repeats:YES block:^(NSTimer *t) { SwkbdPoll(); }];
+    });
+}
+- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)e {
+    if (swkbd_ui_active() && !swkbd_ui_native_state(NULL) && SwkbdPresses(presses)) return;   // typing into the on-screen keyboard
+    if (swkbd_ui_native_state(NULL)) { [super pressesBegan:presses withEvent:e]; return; }
+    BOOL handled = NO;
+    for (UIPress *p in presses) {
+        int b = p.key ? KeyBit(p.key.keyCode) : -1;
+        if (b >= 0) { atomic_fetch_or(&g_key_mask, BIT(b)); handled = YES; }
+    }
+    publish_buttons();
+    if (!handled) [super pressesBegan:presses withEvent:e];
+}
+- (void)pressesEnded:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)e {
+    for (UIPress *p in presses) {
+        int b = p.key ? KeyBit(p.key.keyCode) : -1;
+        if (b >= 0) atomic_fetch_and(&g_key_mask, ~BIT(b));
+    }
+    publish_buttons();
+}
+- (void)pressesCancelled:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)e { [self pressesEnded:presses withEvent:e]; }
+@end
+
+@interface AppDelegate : UIResponder <UIApplicationDelegate>
+@end
+
+static void *RuntimeThread(void *arg) {
+    (void)arg;
+    pthread_setname_np("bdsp-runtime");
+    char *argv[] = {"bdsp", NULL};
+    int rc = bdsp_runtime_main(1, argv);
+    fprintf(stderr, "[ipad] Runtime ended (%d)\n", rc);
+    exit(rc);
+    return NULL;
+}
+
+@implementation AppDelegate
+- (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)opts {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+    // Metal reads MTL_HUD_ENABLED when the device starts; therefore set it before any Metal use (restart required)
+    if ([NSUserDefaults.standardUserDefaults boolForKey:@"bdsp_metal_hud"]) setenv("MTL_HUD_ENABLED", "1", 1);
+    fprintf(stderr, "[ipad] Metal-HUD %s\n", getenv("MTL_HUD_ENABLED") ? "an" : "aus");
+    app.idleTimerDisabled = YES;
+    // The system's screenshot preview takes the foreground for a few seconds; without this the pad is silent meanwhile (issue #3)
+    GCController.shouldMonitorBackgroundEvents = YES;
+    for (GCController *c in GCController.controllers) BindController(c);
+    [NSNotificationCenter.defaultCenter addObserverForName:GCControllerDidConnectNotification object:nil queue:NSOperationQueue.mainQueue
+                                                usingBlock:^(NSNotification *n) {
+        BindController(n.object);
+        GameView *v = gView;
+        v.overlayHidden = YES;   // with controller: touch gamepad off
+        [v buildOverlay];
+    }];
+    [NSNotificationCenter.defaultCenter addObserverForName:GCControllerDidDisconnectNotification object:nil queue:NSOperationQueue.mainQueue
+                                                usingBlock:^(NSNotification *n) {
+        pad_gc_update();   // the pad that went away is no longer listed, so a held stick or button is released
+        GameView *v = gView;
+        v.overlayHidden = GCController.controllers.count > 0;
+        [v buildOverlay];
+    }];
+    ConfigureAudioSession();
+    [NSNotificationCenter.defaultCenter addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:NSOperationQueue.mainQueue
+                                                usingBlock:^(NSNotification *n) {
+        AVAudioSessionInterruptionType type = [n.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
+        fprintf(stderr, "[ipad-audio] interruption %s, options %lu, reason %lu, scene active %d\n", type == AVAudioSessionInterruptionTypeBegan ? "began" : "ended",
+                (unsigned long)[n.userInfo[AVAudioSessionInterruptionOptionKey] unsignedIntegerValue],
+                (unsigned long)[n.userInfo[AVAudioSessionInterruptionReasonKey] unsignedIntegerValue], (int)sceneActive);
+        audioInterrupted = type == AVAudioSessionInterruptionTypeBegan;
+        if (audioInterrupted) SetAudioActive(NO);
+        else if (([n.userInfo[AVAudioSessionInterruptionOptionKey] unsignedIntegerValue] & AVAudioSessionInterruptionOptionShouldResume) &&
+                 sceneActive) SetAudioActive(YES);
+    }];
+    [NSNotificationCenter.defaultCenter addObserverForName:AVAudioSessionRouteChangeNotification object:nil queue:NSOperationQueue.mainQueue
+                                                usingBlock:^(NSNotification *n) {
+        AVAudioSessionRouteDescription *route = AVAudioSession.sharedInstance.currentRoute;
+        NSString *outs = route.outputs.firstObject ? route.outputs.firstObject.portType : @"none";
+        fprintf(stderr, "[ipad-audio] route change, reason %lu, output %s, volume %.2f\n",
+                (unsigned long)[n.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue], outs.UTF8String,
+                AVAudioSession.sharedInstance.outputVolume);
+    }];
+    [NSNotificationCenter.defaultCenter addObserverForName:AVAudioSessionMediaServicesWereResetNotification object:nil queue:NSOperationQueue.mainQueue
+                                                usingBlock:^(NSNotification *n) {
+        (void)n;
+        fprintf(stderr, "[ipad-audio] media services were reset\n");
+    }];
+    return YES;
+}
+
+@end
+
+// Starts the runtime with the game (mod == NULL) or with a mod: the mod's RomFS is merged over the game's and the mod gets a save folder of
+// its own. Exported installed mods use a stable profile ID; legacy/local mods use their name.
+// Dropped-in saves require explicit import through the save-management menu.
+static NSDictionary *InstallerData(void) {
+    NSString *path = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"res/install-data.plist"];
+    return [NSDictionary dictionaryWithContentsOfFile:path];
+}
+
+static NSString *InstallerDocumentPath(NSDictionary *metadata, NSString *key) {
+    id relative = metadata[key];
+    if (![relative isKindOfClass:NSString.class] || ![relative length] || [relative isAbsolutePath]) return nil;
+    if ([metadata[@"ExternalLibrary"] boolValue]) return BDSPSharedDataPath(relative);
+    NSString *docs = Documents().stringByStandardizingPath;
+    NSString *path = [[docs stringByAppendingPathComponent:relative] stringByStandardizingPath];
+    return [path hasPrefix:[docs stringByAppendingString:@"/"]] ? path : nil;
+}
+
+static NSString *StableInstalledProfile(const ModInfo *mod) {
+    NSDictionary *data = InstallerData();
+    NSString *root = InstallerDocumentPath(data, @"ModDirectory");
+    return mod && [data[@"ExternalLibrary"] boolValue] && [data[@"SaveStorageVersion"] intValue] >= 2 && root &&
+        !strcmp(mod->root, root.UTF8String) ? data[@"SaveProfile"] : nil;
+}
+
+static void StartSelectedRuntime(const ModInfo *mod) {
+    if (getenv("BDSP_PROBE_FIXED")) ProbeFixedWindows();
+    NSString *docs = Documents(), *res = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"res"];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *saves = BDSPBaseSaveRoot() ?: [docs stringByAppendingPathComponent:@"Saves"];
+    [fm createDirectoryAtPath:[docs stringByAppendingPathComponent:@"Shots"] withIntermediateDirectories:YES attributes:nil error:nil];
+    if (mod) {
+        NSString *stable = StableInstalledProfile(mod);
+        if (mods_activate_profile(mod, saves.UTF8String, stable.UTF8String) != 0) {
+            fprintf(stderr, "[mods] cannot start \"%s\"\n", mod->name);
+            BDSPShowDataError(@"The mod save folder could not be opened. Existing saves were kept.");
+            return;
+        }
+        setenv("BDSP_SAVE", mods_active_save(), 1);
+        saves = @(mods_active_save());
+    }
+    NSString *profile = StableInstalledProfile(mod) ?: (mod ? [Sha256([[@(mod->name) lowercaseString] dataUsingEncoding:NSUTF8StringEncoding]) substringToIndex:20] : @"vanilla");
+    NSError *saveError = nil;
+    if (!BDSPConfigureSaveRoot(saves, InstallerData(), profile, &saveError)) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Save recovery needs attention" message:saveError.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [gView.window.rootViewController presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    setenv("BDSP_IMG", [res stringByAppendingPathComponent:@"img32"].UTF8String, 1);
+    setenv("BDSP_NPDM", [res stringByAppendingPathComponent:@"main.npdm"].UTF8String, 1);
+    NSString *romfs = InstallerDocumentPath(InstallerData(), @"RomFSDirectory") ?: [docs stringByAppendingPathComponent:@"GameData/romfs"];
+    setenv("BDSP_ROMFS", romfs.UTF8String, 1);
+    setenv("BDSP_SAVE", saves.UTF8String, 1);
+    {   // firmware files of the on-screen keyboard (layouts, fonts, name check); without them the keyboard is a simple one of our own
+        NSString *fw = [res stringByAppendingPathComponent:@"Firmware"];
+        if (![fm fileExistsAtPath:fw]) fw = [docs stringByAppendingPathComponent:@"Firmware"];
+        if ([fm fileExistsAtPath:fw]) setenv("BDSP_FIRMWARE_DATA", fw.UTF8String, 0);
+    }
+    setenv("BDSP_SHOT_DIR", [docs stringByAppendingPathComponent:@"Shots"].UTF8String, 0);
+    setenv("BDSP_TIMEOUT", "86400", 0);
+    setenv("BDSP_FPS_INTERVAL", "5", 0);
+    NSInteger fps = [NSUserDefaults.standardUserDefaults integerForKey:@"bdsp_fps"];
+    bdsp_set_fps(fps ? (int)fps : 60);
+    {   // Settings > BDSP > Picture: aspect ratio and render height (runtime/display_size.c reads them before the game starts)
+        NSString *aspect = [NSUserDefaults.standardUserDefaults stringForKey:@"bdsp_aspect"];
+        NSString *height = [NSUserDefaults.standardUserDefaults stringForKey:@"bdsp_render_h"];
+        if (aspect.length) setenv("BDSP_ASPECT", aspect.UTF8String, 0);
+        if (height.length) setenv("BDSP_RENDER_H", height.UTF8String, 0);
+    }
+    fprintf(stderr, "[ipad] Start: %s, device %s, os_proc_available_memory %zu MiB\n", UIDevice.currentDevice.systemVersion.UTF8String,
+            UIDevice.currentDevice.model.UTF8String, os_proc_available_memory() >> 20);
+    if (![fm contentsOfDirectoryAtPath:[romfs stringByAppendingPathComponent:@"Data"] error:nil].count) {
+        fprintf(stderr, "[ipad] Game data missing or empty, runtime not started: %s/Data (docs/recomp-ios.md)\n", romfs.UTF8String);
+        BDSPShowMissingData();
+        return;
+    }
+    pthread_t t, st;
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setstacksize(&at, 8 << 20);
+    pthread_create(&t, &at, RuntimeThread, NULL);
+    pthread_detach(t);
+    pthread_create(&st, NULL, StatsLoop, NULL);
+    pthread_detach(st);
+}
+
+static void LaunchRuntime(const ModInfo *mod) {
+    NSString *saves = BDSPBaseSaveRoot() ?: [Documents() stringByAppendingPathComponent:@"Saves"];
+    NSString *profile = @"vanilla";
+    if (mod) {
+        NSString *stable = StableInstalledProfile(mod);
+        saves = [[saves stringByAppendingPathComponent:@"mods"] stringByAppendingPathComponent:stable ?: @(mod->name)];
+        profile = stable ?: [Sha256([[@(mod->name) lowercaseString] dataUsingEncoding:NSUTF8StringEncoding]) substringToIndex:20];
+    }
+    NSError *error = nil;
+    if (!BDSPConfigureSaveRoot(saves, InstallerData(), profile, &error)) {
+        BDSPShowDataError(error.localizedDescription);
+        return;
+    }
+    BDSPConfirmStart(^{ StartSelectedRuntime(mod); });
+}
+
+// Documents/Mods holds mods in the layout of Ryujinx and yuzu (<name>/romfs, <name>/exefs), copied there with the Files app. With at least one
+// mod the app asks at launch what to start; the last choice is preselected. BDSP_MOD=<name|none> (devicectl --environment-variables) skips
+// the dialog for automated runs.
+static ModInfo gMods[MODS_MAX];
+
+// Called from SceneDelegate as soon as the game view appears: then the CAMetalLayer exists with its size
+static void StartRuntime(void) {
+    NSString *modsDir = [Documents() stringByAppendingPathComponent:@"Mods"];
+    [NSFileManager.defaultManager createDirectoryAtPath:modsDir withIntermediateDirectories:YES attributes:nil error:nil];   // visible in the Files app
+    int n = mods_scan(modsDir.UTF8String, gMods, MODS_MAX);
+    NSDictionary *installed = InstallerData();
+    NSString *installedRoot = InstallerDocumentPath(installed, @"ModDirectory");
+    if ([installed[@"ExternalLibrary"] boolValue] && installedRoot) {
+        ModInfo imported[MODS_MAX];
+        int count = mods_scan(installedRoot.stringByDeletingLastPathComponent.UTF8String, imported, MODS_MAX);
+        if ([installed[@"CompiledExeFS"] boolValue]) n = 0;
+        for (int i = 0; i < count && n < MODS_MAX; i++)
+            if (!strcmp(imported[i].root, installedRoot.UTF8String)) gMods[n++] = imported[i];
+    }
+    NSString *installedName = installed[@"ModName"];
+    BOOL compiled = [installed[@"CompiledExeFS"] boolValue];
+    int installedIndex = -1;
+    if (installedRoot && [installedName isKindOfClass:NSString.class] && installedName.length && strlen(installedName.UTF8String) < sizeof gMods[0].name) {
+        for (int i = 0; i < n; i++) if (!strcmp(gMods[i].root, installedRoot.UTF8String)) {
+            snprintf(gMods[i].name, sizeof gMods[i].name, "%s", installedName.UTF8String);
+            installedIndex = i;
+            break;
+        }
+    }
+    if (compiled) {
+        if (installedIndex < 0) {
+            UIAlertController *missing = [UIAlertController alertControllerWithTitle:@"Mod files missing"
+                message:@"Connect this device to the installer to finish copying the mod files. This app contains code built for that mod."
+                preferredStyle:UIAlertControllerStyleAlert];
+            [missing addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [gView.window.rootViewController presentViewController:missing animated:YES completion:nil];
+            return;
+        }
+        setenv("BDSP_COMPILED_EXEFS", installedName.UTF8String, 1);
+        LaunchRuntime(&gMods[installedIndex]);
+        return;
+    }
+    const char *want = getenv("BDSP_MOD");
+    if (want && *want) {
+        for (int i = 0; i < n; i++) if (!strcasecmp(gMods[i].name, want)) { LaunchRuntime(&gMods[i]); return; }
+        if (strcasecmp(want, "none") && strcasecmp(want, "diamond")) {
+            fprintf(stderr, "[mods] BDSP_MOD=%s: no such mod in Documents/Mods (%d found)\n", want, n);
+            exit(2);
+        }
+        LaunchRuntime(NULL);
+        return;
+    }
+    if (n == 0) { LaunchRuntime(NULL); return; }
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    // A mod installed together with this app (data-only mod) is the game the user built it for: start it without the dialog.
+    // Settings > Ask which game to start brings the dialog back for switching to Brilliant Diamond or another mod.
+    if (installedIndex >= 0 && ![ud boolForKey:@"bdsp_ask_game"]) {
+        fprintf(stderr, "[mods] starting the installed mod \"%s\" (Settings > Ask which game to start shows the choice)\n", gMods[installedIndex].name);
+        LaunchRuntime(&gMods[installedIndex]);
+        return;
+    }
+    NSString *last = [ud stringForKey:@"bdsp_mod"] ?: (installedIndex >= 0 ? installedName : @"");
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Choose a game"
+        message:@"A mod runs with a save of its own. The save of Brilliant Diamond is not touched while a mod is active."
+        preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertAction *game = [UIAlertAction actionWithTitle:@"Brilliant Diamond" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+        (void)x;
+        [ud setObject:@"" forKey:@"bdsp_mod"];
+        LaunchRuntime(NULL);
+    }];
+    [a addAction:game];
+    UIAlertAction *preferred = last.length ? nil : game;
+    for (int i = 0; i < n; i++) {
+        const ModInfo *m = &gMods[i];
+        NSString *name = @(m->name);
+        UIAlertAction *act = [UIAlertAction actionWithTitle:name style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+            (void)x;
+            [ud setObject:name forKey:@"bdsp_mod"];
+            LaunchRuntime(m);
+        }];
+        [a addAction:act];
+        if ([name isEqualToString:last]) preferred = act;
+    }
+    if (preferred) a.preferredAction = preferred;
+    [gView.window.rootViewController presentViewController:a animated:YES completion:nil];
+}
+
+@implementation SceneDelegate
+- (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
+    (void)session;
+    (void)options;
+    self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
+    self.window.rootViewController = [GameVC new];
+    [self.window makeKeyAndVisible];
+}
+- (void)sceneWillResignActive:(UIScene *)scene {
+    (void)scene;
+    sceneActive = NO;
+    fprintf(stderr, "[ipad-audio] scene resigns active: audio off\n");
+    SetAudioActive(NO);
+}
+- (void)sceneDidBecomeActive:(UIScene *)scene {
+    (void)scene;
+    sceneActive = YES;
+    fprintf(stderr, "[ipad-audio] scene became active: audio %s\n", audioInterrupted ? "stays off (interrupted)" : "on");
+    if (!audioInterrupted) SetAudioActive(YES);
+    ApplyAppIcon();
+}
+- (void)startRuntime {
+    if (bdsp_guest_window_error) {
+        NSString *detail = [NSString stringWithFormat:@"The game needs a fixed 4 GiB address range that this app could not reserve (error %d). "
+            "The usual cause is that the app was signed without the Increased Memory Limit entitlement (some sideloading tools remove it) or that it runs inside another app. "
+            "Install it again with an entitlement-preserving signer, or send BDSP-log.txt from this app's Documents folder (Files app) with your report.", bdsp_guest_window_error];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"The game cannot start on this setup" message:detail preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [gView.window.rootViewController presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    BDSPPrepareData(gView.window.rootViewController, InstallerData(), ^{ StartRuntime(); });
+}
+@end
+
+// Everything the app prints to stdout/stderr is also written to Documents/BDSP-log.txt (the previous run stays in
+// BDSP-log-previous.txt), so a user can read or send it from the Files app (file sharing is on in Info.plist) even
+// when no Xcode console is attached, e.g. after a sideloaded install. The log stops growing at 32 MiB.
+static int logFile = -1;
+
+static void LogCrashSignal(int sig) {
+    char line[96];
+    int n = snprintf(line, sizeof line, "\n[crash] signal %d on the %s thread\n", sig, pthread_main_np() ? "main" : "a worker");
+    if (logFile >= 0 && n > 0) {
+        write(logFile, line, (size_t)n);
+        void *frames[48];
+        backtrace_symbols_fd(frames, backtrace(frames, 48), logFile);
+        fsync(logFile);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void LogUncaughtException(NSException *exception) {
+    fprintf(stderr, "[crash] uncaught exception %s: %s\n%s\n", exception.name.UTF8String, exception.reason.UTF8String,
+            exception.callStackSymbols.description.UTF8String);
+    if (logFile >= 0) fsync(logFile);
+}
+
+// Mach-O does not order constructors across object files by priority: the guest window reservation may run before this
+// one, so its failure is repeated below once the log exists.
+__attribute__((constructor(100))) static void StartLogFile(void) {
+    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    if (!docs) return;
+    NSString *path = [docs stringByAppendingPathComponent:@"BDSP-log.txt"];
+    NSString *previous = [docs stringByAppendingPathComponent:@"BDSP-log-previous.txt"];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    [fm removeItemAtPath:previous error:nil];
+    [fm moveItemAtPath:path toPath:previous error:nil];
+    logFile = open(path.fileSystemRepresentation, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int pipes[2];
+    if (logFile < 0 || pipe(pipes)) return;
+    int console = dup(STDERR_FILENO);
+    dup2(pipes[1], STDERR_FILENO);
+    dup2(pipes[1], STDOUT_FILENO);
+    close(pipes[1]);
+    int source = pipes[0], file = logFile;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        char buffer[4096];
+        long written = 0;
+        ssize_t n;
+        while ((n = read(source, buffer, sizeof buffer)) > 0) {
+            if (console >= 0) write(console, buffer, (size_t)n);
+            if (written < (32L << 20)) { write(file, buffer, (size_t)n); written += n; }
+        }
+    });
+    NSSetUncaughtExceptionHandler(LogUncaughtException);
+    const int fatal[] = {SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGTRAP};
+    for (size_t i = 0; i < sizeof fatal / sizeof *fatal; i++) signal(fatal[i], LogCrashSignal);
+    // os_proc_available_memory shows whether the increased memory limit entitlement survived signing (about 5 GiB without it).
+    fprintf(stderr, "[log] %s, iOS %s, %.1f GiB RAM, %zu MiB available to this app\n",
+            NSBundle.mainBundle.bundleIdentifier.UTF8String, UIDevice.currentDevice.systemVersion.UTF8String,
+            NSProcessInfo.processInfo.physicalMemory / 1073741824.0, os_proc_available_memory() >> 20);
+    if (bdsp_guest_window_error) fprintf(stderr, "FATAL: the guest window 0x800000000-0x900000000 could not be reserved (error %d)\n", bdsp_guest_window_error);
+}
+
+int main(int argc, char *argv[]) {
+    if (getenv("BDSP_HANG_DUMP")) {   // stall diagnosis: the harness ends hanging runs with SIGTERM, then the thread report appears
+        extern void kernel_report(FILE *f);
+        signal(SIGTERM, SIG_IGN);
+        dispatch_source_t term = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGTERM, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+        dispatch_source_set_event_handler(term, ^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ _exit(143); });  // the report hangs on a held lock
+            kernel_report(stderr);
+            fflush(stderr);
+            _exit(143);
+        });
+        dispatch_resume(term);
+    }
+    @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(AppDelegate.class)); }
+}

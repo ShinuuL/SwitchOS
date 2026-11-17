@@ -1,0 +1,575 @@
+# Build guide: BDSP recompilation
+
+German version: [BUILD.de.md](BUILD.de.md).
+
+## 1. Overview
+
+BDSP is a recompilation of the original *Pokémon Brilliant Diamond* code. The build turns the game's
+machine code into native C, compiles it, and links it with a runtime that provides the console
+services and a graphics backend (Metal on macOS and iPadOS, Vulkan on Linux and Windows).
+
+- The repository contains only our own code, scripts, and documentation. It contains no game content,
+  no keys, no saves, and no screenshots.
+- You need your own dump of the game: the base `.xci` (optional `.nsp` update) and your `prod.keys`
+  (plus `title.keys`). Keep them outside the repository. The scripts only read them.
+- Everything the scripts produce goes to `work/`, which is git-ignored. Never commit `work/`.
+- Targets: macOS app, iPadOS and iPhone app, Linux with Vulkan (section 6), Windows with Vulkan (section "Windows" after section 6).
+
+## Quick start (guided)
+
+Two guided installers do everything in this guide for you. Run `--dry-run` first if you want to see what they would do.
+
+- **macOS:** double-click `install.command` in the Finder or run `./install.command`. It checks Xcode, Homebrew (and offers
+  the official Homebrew installer if it is missing), the Homebrew packages, Python, and a private Python environment
+  `work/venv` (Pillow, LZ4, Unicorn native assets). Then you drag your `.xci`, optionally the update `.nsp`, and your `prod.keys`
+  into the window, and it runs the stages `tools`, `extract` and `recomp` of `scripts/build_all.sh` (section 4).
+  Plan for at least 40 GB of free space; a measured run on a prepared 8-thread Mac took about 8 minutes (section 4.2).
+- **Linux:** run `./install-linux.sh`. It detects `apt`, `dnf` or `pacman`, lists the missing development packages and installs
+  them after you agree (the package manager asks for your administrator password through `sudo`; the script never sees it).
+  The Vulkan Memory Allocator is not in the official Arch packages: the installer and the script download the header
+  themselves (pinned version, SHA-256 checked, no sudo).
+  It then sets up `work/venv`, asks for your files, and runs the build of section 6.2. Several hours (section 6.4).
+
+Both scripts speak English, German, Spanish and Portuguese (system language, or `BDSP_LANG=de|en|es|pt`). The texts are in
+`scripts/install/lang/<code>.sh`; to add a language, copy `en.sh`, translate the values and add the code in
+`scripts/install/common.sh`. If a script stops, run it again: finished stages are skipped. The sections below describe the
+same steps by hand.
+
+## 2. Common prerequisites
+
+| Item | Needed for | Check |
+|---|---|---|
+| Xcode 16 or newer (in `/Applications/Xcode.app`), license accepted. Xcode 26 or newer builds the Liquid Glass app icon (Icon Composer); Xcode 16 to 25 builds a classic icon without it (`BDSP_LEGACY_ICONS=1` forces that on any Xcode). | macOS and iPadOS builds and app icon compilation | `xcodebuild -version` |
+| Command Line Tools | Compilers, `codesign`, `otool`, `iconutil` | `xcode-select -p` |
+| Python 3.9 or newer | `build_all.sh`, helper scripts | `python3 --version` |
+| Pillow in the selected Python environment | Deterministic original-icon conversion | `python3 -c 'from PIL import Image'` |
+| Homebrew packages `llvm`, `sdl3`, `ffmpeg`, `pkg-config` | macOS app (`recomp` stage) | `pkg-config --exists sdl3 libavcodec libavformat libavutil` |
+| Unicorn 2.1.4 C headers/library in `tools/pydeps` or `BDSP_UNICORN_ROOT` | Code generator (`recomp` stage) | `ls tools/pydeps` |
+| `git`, `make`, `cc` | Stage `tools` (builds `hactool`, only when no usable `hactool` is on `PATH`) | `command -v git make cc` |
+
+Install the Homebrew packages and the Python packages:
+
+```sh
+brew install llvm sdl3 ffmpeg pkg-config
+python3 -m pip install --target tools/pydeps unicorn==2.1.4
+```
+
+The `recomp` stage needs the Homebrew LLVM first in `PATH`, before `/usr/bin`:
+
+```sh
+export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
+```
+
+Nothing is installed with `sudo`. If a check fails, `scripts/build_all.sh preflight` lists what is missing.
+
+## 3. Local configuration (`work/local.env`)
+
+Create `work/local.env`. The file is git-ignored. Do not put these values anywhere else in the repository.
+
+```sh
+TEAM_ID=<TEAM_ID>
+```
+
+- `TEAM_ID`: your Apple developer team ID. Used only for the iPadOS build (`deploy_ios.sh`). It is passed
+  to `xcodebuild` on the command line and is not written to the project.
+
+Write the file in shell syntax: no spaces around `=`.
+
+## 4. macOS app (stage `recomp`, `--target macos`)
+
+### 4.1 Get the game data (stage `extract`)
+
+The `recomp` stage reads `work/exefs` and `work/romfs`. Create them first:
+
+```sh
+scripts/build_all.sh --only tools,extract --xci <path/to/game.xci> --keys <folder/with/prod.keys>
+```
+
+Use `--prod-keys <file>` and `--title-keys <file>` instead of `--keys` if your keys are in separate files.
+Add `--nsp <update.nsp>` if you have the update.
+The base source may instead be `--base-nsp <base.nsp>` or `--base-nca-dir <folder>`.
+Use exactly one base source. The NCA folder must contain the original `.nca` files
+and, when required, its `.tik` tickets. Extraction identifies the base Program NCA
+and applies the optional update to that base. The cache records content hashes of
+the selected sources; editing a file without changing its size still invalidates it.
+
+The development GUI now sends these three source forms through the same extraction
+stage, then builds the native macOS or Linux desktop target and installs it. On macOS,
+the default destination is `/Applications/BDSP.app`; the installer updates only
+an app identified by its own receipt and unchanged executable. A different app
+at that path is left untouched and reported as a conflict. On Linux, the package lives under
+`$XDG_DATA_HOME/strahlender-xnu/app` (or `~/.local/share/strahlender-xnu/app`),
+with a launcher at `~/.local/bin/strahlender-xnu` and a desktop entry under the
+user's `applications/` directory. Saves live beside the Linux package in `saves/`,
+outside its replaceable `app/` folder. Runtime libraries still come from the
+documented system packages. The GUI connection is under development and has only
+been exercised with synthetic installation fixtures, not an end-to-end game build.
+
+### 4.2 Build the app
+
+```sh
+scripts/build_all.sh --dry-run --only recomp --target macos   # plan only, changes nothing
+scripts/build_all.sh --only recomp --target macos
+```
+
+Result: `work/builds/macos-recomp/BDSP.app` (arm64, Metal, ad hoc signed).
+
+**Minimum system.** The app targets macOS 14 (Sonoma); iPhone and iPad stay at iOS and iPadOS 17. The macOS value lives in one place,
+`BDSP_MACOS_MIN` in `scripts/recomp/macos_target.sh`. It sets `-mmacosx-version-min` for every object and the link (guest code, runtime,
+NVN/Metal layer), the AIR target of the Metal libraries (`air64-apple-macos14.0`; the iOS libraries use `ios17.0`),
+`LSMinimumSystemVersion` of the Info.plist and the deployment target of the icon compiler. Changing it rebuilds the objects and the
+shader libraries. `scripts/recomp/availability_check.sh` (part of `scripts/check.sh`) compiles the runtime and the iOS app sources against
+the installed SDKs for these minimums and fails on any API newer than the minimum that is not guarded with `@available`.
+
+What was checked: the runtime has no unguarded newer API (macOS 15/26 or iOS 18/26) against the SDKs of Xcode 27.1 and Xcode 16.4;
+all 2739 game shaders and the Metal sources embedded in the runtime compile for the macOS 14 target with both; apps built with
+both start on macOS 26.6 (Tahoe) with the macOS 14 libraries, load every prebuilt library and show no Metal validation message.
+**Not checked:** a run on macOS 14 or 15, on iOS 17 or 18, and the Metal libraries there. Tests on such systems are welcome.
+Limits: the bundled Homebrew libraries (SDL3, FFmpeg) are the ones of the building Mac and carry its minimum system (Tahoe bottles say
+26.0), so the linker prints "built for newer version" warnings there; an app is meant for the Mac that built it or a newer one.
+The Liquid Glass icons are compiled by `actool` of Xcode 26 or newer; with Xcode 16 to 25 the apps get a classic icon without Liquid Glass.
+
+C generation uses the native C17 tool in `scripts/recomp/native-generator/`.
+It chooses a thread count from the host CPU/RAM budget. Modules run sequentially;
+classification, independent large scans and emission use bounded pthread/Win32
+workers. Stateful Unicorn jump-table discovery stays in address order.
+`BDSP_GEN_JOBS=1` selects serial C execution; `BDSP_GEN_JOBS=N` or
+`bash scripts/recomp/codegen.sh gen ... --jobs N` overrides the generator threads
+independently of `--recomp-jobs` (Clang). Scheduling does not change file contents.
+Unicorn is called through its existing C API; the generator uses neither Capstone nor
+Unicorn's Python bindings, and new installer runtimes exclude them. Python remains for build orchestration and asset tools such as Pillow,
+LZ4 and UnityPy. See [the native generator README](../scripts/recomp/native-generator/README.md).
+
+Original icons and their language variants are generated only from user-provided
+game data. Artwork and generated assets remain under ignored `work/`.
+See [recomp-icons.md](recomp-icons.md) for extraction, selection, and platform styling.
+
+On 2026-10-23, a clean GitHub clone plus the current local source changes took **7 min 42 s**
+from the start of `scripts/build_all.sh --only tools,extract,recomp --target macos` to a signed
+`BDSP.app` on an 8-thread/16-GiB Apple Silicon Mac. This used a base XCI without an update NSP,
+8 parallel Clang jobs, and fresh project `work/` and app-data directories. The GitHub clone took
+1 s; creating a Python venv and installing four packages took another 3 s with locally cached
+package downloads. Xcode 27.1 and the Homebrew libraries were already installed. The measured
+build stages were: hactool setup 5 s, XCI extraction 23 s, C generation 68 s, C compilation
+about 5 min 25 s (312 s reported inside the compile script), then module images, runtime/Metal,
+app assembly, signing and RomFS setup. The result was a 361-MiB arm64 app whose signature passed
+`codesign --verify --deep --strict`. Historical slower runs under load are in
+`docs/recomp-macapp.md`. Later builds reuse the markers and are much faster (section 7).
+
+Useful options:
+
+| Option | Meaning |
+|---|---|
+| `--recomp-jobs N` | override the CPU/RAM-based number of parallel compiler jobs |
+| `--recomp-o0-kb N` | functions from N KB upward are compiled with `-O0` (default 300) |
+| `--force` | rebuild the stage even if the marker matches |
+| `--hardened` | sign with the Hardened Runtime (default: ad hoc only) |
+| `--no-install-data` | do not install the RomFS under Application Support |
+
+### 4.3 Start the app and set options
+
+Start from the Finder (`open work/builds/macos-recomp/BDSP.app`) or from a terminal. Environment variables
+are passed only when you start the binary directly:
+
+```sh
+BDSP_FPS=60 work/builds/macos-recomp/BDSP.app/Contents/MacOS/BDSP
+```
+
+| Variable | Values | Effect |
+|---|---|---|
+| `BDSP_FPS` | `30`, `60`, `120` | frame rate. Other values are ignored. Overrides the saved menu setting. |
+| `BDSP_PRESENT_AT` | `off`, `min`, `grid`, `lock` | presentation timing. The Mac default is `lock`. `off` restores the old behaviour. |
+| `BDSP_EXEC_WORKER` | `0` | `0` turns off the translation worker and uses the synchronous path. On by default. |
+| `BDSP_FPS_INTERVAL` | seconds | period of the `fps` log line (default 2). |
+
+From a terminal the log stays on screen. From the Finder it goes to the log folder (`BDSP_LOG_STDOUT=1` forces
+terminal output). Configuration file, save data, and cache paths: see `docs/recomp-macapp.md`.
+
+Limits: no network. The first launch may need right-click → Open (Gatekeeper, ad hoc signature).
+
+## 5. iPadOS app (`scripts/recomp/ios/deploy_ios.sh`)
+
+### 5.1 Prerequisites
+
+- `TEAM_ID` in `work/local.env` (section 3).
+- A paired iPad, unlocked, trusted, and connected. The script selects the first connected iPad.
+- The iOS build inputs in `work/recomp/obj4i` and `work/recomp/img4i`. Create them with
+  `scripts/recomp/ios/gen32.sh` (see `docs/recomp-ios.md`).
+- `work/exefs` with `main.npdm`, from stage `extract`.
+
+### 5.2 Commands
+
+```sh
+scripts/recomp/ios/deploy_ios.sh build          # runtime, libgame.a, resources, and the app (xcodebuild)
+scripts/recomp/ios/deploy_ios.sh install        # install the app on the iPad
+scripts/recomp/ios/deploy_ios.sh data           # copy work/romfs to the app container (once, about 4.7 GB)
+scripts/recomp/ios/deploy_ios.sh save           # optional: copy save files from work/recomp/save
+scripts/recomp/ios/deploy_ios.sh run 120        # start for 120 seconds; without a number, run until Ctrl-C
+scripts/recomp/ios/deploy_ios.sh shots          # copy screenshots to work/visual/ipad-recomp/
+scripts/recomp/ios/deploy_ios.sh files [path]   # list files in the app container
+```
+
+Environment variables for the script:
+
+- `DEVICE_NAME`: part of the device name, if more than one iPad is connected.
+- `BUNDLE_ID`: default `dev.local.xnubdsp`.
+- `RUN_ENV`: JSON with environment variables for `run`, for example `{"BDSP_TIMEOUT":"130"}`.
+
+The log of each `run` goes to `work/builds/logs/ipad-recomp-<time>.log`. The build log goes to
+`work/builds/logs/ios-recomp-xcodebuild.log`.
+
+### 5.3 Signing
+
+Signing is your job. Select your team and provisioning in Xcode if the build fails. The script passes
+`TEAM_ID` and `-allowProvisioningUpdates` to `xcodebuild`. Do not change `project.pbxproj` in the
+repository to set the team.
+
+## 6. Linux with Vulkan
+
+Linux x86-64 is supported. Linux aarch64 is experimental (section 6.5): installer, build tools and generator work on a real aarch64 machine, but the runtime compiles and links on aarch64, but a full game start and rendering are not verified; testers are welcome. See section 6.4 for the known limits.
+
+### 6.1 Requirements
+
+Use a Linux x86-64 or aarch64 machine with a Vulkan 1.3 capable GPU and its driver. AVX2 is not required.
+Local game builds default to `BDSP_CPU_TARGET=native`: the compiler enables the build CPU's
+supported instructions (`-march=native` on x86-64, `-mcpu=native` on aarch64), including AVX/AVX2 where
+available. An older CPU builds without
+unsupported extensions. This does not guarantee compatibility with a different, older CPU.
+Set `BDSP_CPU_TARGET=portable` for the x86-64 baseline (AArch64: ARMv8-A).
+Changing CPU profiles or moving native builds between hosts invalidates generated-code and
+Vulkan object caches. Distributed installer binaries keep their portable compiler defaults.
+
+`./install-linux.sh` (see "Quick start") installs the packages below for you after you confirm; by hand, install
+them yourself. The build and check scripts (`deps.sh` and the scripts in `scripts/recomp/linux/local/`) only check and do not
+install packages or download/copy third-party headers. Qt, SDL3, Vulkan, shaderc,
+and FFmpeg use installed system headers/libraries through pkg-config. No copied
+include-vk/ or deps/include/ fallback is used. Runtime-only packages are not enough.
+
+| Dependency | Debian/current Ubuntu | Fedora | Arch Linux |
+|---|---|---|---|
+| Qt 6 Widgets development | qt6-base-dev | qt6-qtbase-devel | qt6-base |
+| C/C++ tools, CMake, pkg-config | clang, build-essential, cmake, pkg-config | clang, gcc-c++, cmake, pkgconf-pkg-config | clang, base-devel, cmake, pkgconf |
+| Vulkan headers and loader development | libvulkan-dev | vulkan-headers, vulkan-loader-devel | vulkan-headers, vulkan-icd-loader |
+| SDL3 development | libsdl3-dev | SDL3-devel | sdl3 |
+| shaderc development | libshaderc-dev | libshaderc-devel | shaderc |
+| Vulkan Memory Allocator headers | libvulkan-memory-allocator-dev | VulkanMemoryAllocator-devel | none (pinned download by the installer) |
+| FFmpeg development | libavcodec-dev, libavformat-dev, libavutil-dev | libavcodec-free-devel, libavformat-free-devel, libavutil-free-devel | ffmpeg |
+| Icon conversion | python3-pil | python3-pillow | python-pillow |
+| GNU time (`/usr/bin/time`) | time | time | time |
+
+These are user-run commands; use your normal administrator workflow:
+
+```sh
+# Fedora
+dnf install clang gcc-c++ cmake pkgconf-pkg-config qt6-qtbase-devel vulkan-headers vulkan-loader-devel SDL3-devel libshaderc-devel VulkanMemoryAllocator-devel libavcodec-free-devel libavformat-free-devel libavutil-free-devel python3-pillow time
+
+# Debian / sufficiently recent Ubuntu
+apt install clang build-essential cmake pkg-config qt6-base-dev libvulkan-dev libsdl3-dev libshaderc-dev libvulkan-memory-allocator-dev libavcodec-dev libavformat-dev libavutil-dev python3-pil time
+
+# Arch official packages; the installer downloads a pinned VMA header (installer/assets/vma.json), no AUR needed
+pacman -S --needed clang base-devel cmake pkgconf qt6-base vulkan-headers vulkan-icd-loader sdl3 shaderc ffmpeg python-pillow time
+```
+
+SDL3/VMA availability depends on the Debian/Ubuntu release. Do not replace missing
+packages with automatic repository downloads. On Fedora-derived distributions,
+use development packages matching the FFmpeg provider already installed; do not
+blindly replace or mix providers. BDSP_NO_MOVIE=1 explicitly omits movie support
+and its FFmpeg requirement, but the intro path is then unsupported.
+
+SteamOS (Arch based): the installer downloads the Vulkan Memory Allocator header itself (pinned version, SHA-256 checked, no
+sudo, stored in its data folder), so the AUR is not needed. The root file system is read-only (`sudo steamos-readonly disable`),
+pacman needs `sudo pacman-key --init && sudo pacman-key --populate archlinux holo`, and SteamOS updates remove packages
+installed this way.
+
+Native Wayland also needs the Qt platform plugin (Debian qt6-wayland; Fedora
+qt6-qtwayland). X11 uses the xcb plugin and may need its distribution's cursor
+support package. No Qt private-devel headers, PySide6, or vendored Qt is required.
+
+Verified primary package references:
+[Fedora Qt](https://packages.fedoraproject.org/pkgs/qt6-qtbase/qt6-qtbase-devel/),
+[Vulkan loader](https://packages.fedoraproject.org/pkgs/vulkan-loader/vulkan-loader-devel/),
+[SDL3](https://packages.fedoraproject.org/pkgs/SDL3/SDL3-devel/),
+[shaderc](https://packages.fedoraproject.org/pkgs/shaderc/libshaderc-devel/),
+[VMA](https://packages.fedoraproject.org/pkgs/VulkanMemoryAllocator/VulkanMemoryAllocator-devel/),
+[FFmpeg](https://packages.fedoraproject.org/pkgs/ffmpeg/).
+Debian lists [SDL3](https://packages.debian.org/forky/libsdl3-dev) and
+[VMA](https://packages.debian.org/sid/armhf/libvulkan-memory-allocator-dev).
+The Arch official package search does not list VMA; the installer and
+`install-linux.sh` download a pinned, SHA-256 checked header instead of using the AUR.
+
+### 6.2 Build and run locally
+
+The Linux build runs directly on the Linux machine, from the repository root; its scripts are in `scripts/recomp/linux/local/` (the dependency checks are in `scripts/recomp/linux/deps.sh`).
+
+1. Install the Linux development packages above, asset dependency `lz4` and
+   `unicorn==2.1.4` (provides the native C headers/library; no Python code generation).
+2. Check the installed packages (no copying, downloads, or installation):
+   `bash -c 'source scripts/recomp/linux/deps.sh && linux_require_runtime && linux_require_qt'`.
+   Leave out `linux_require_qt` if you do not build the Qt frontend.
+3. Provide the inputs `work/exefs/`, `work/romfs/`, and `work/recomp/icons/source/`. Extract your own legally
+   obtained game dump on this machine with the command in section 4.1 (the
+   extract stage also writes the icon source), or copy existing folders into the same layout. The Linux build
+   scripts do not read keys or the `.xci`.
+   Optional: `scripts/recomp/linux/local/setup.sh` compares the inputs with `work/exefs.sha256` if that file
+   exists; without it, the script only prints a note. Create the manifest from the repository root with
+   `sha256sum work/exefs/rtld work/exefs/main work/exefs/sdk work/exefs/subsdk0 > work/exefs.sha256`.
+4. Generate and compile guest modules: `bash scripts/recomp/linux/local/build_all.sh`.
+5. Build Vulkan and the in-process Qt frontend:
+   `bash scripts/recomp/linux/local/vk_build.sh --qt`. Output:
+   `work/recomp/bdsp_boot_vk_qt`. Icon variants are converted from extracted
+   source data into Linux assets under `work/recomp/icons/` during this build.
+6. Launch locally with `bash scripts/recomp/linux/local/vk_qt.sh` and the
+   desktop-session environment below.
+
+The in-process host creates its own Vulkan surface and supports native Wayland
+or X11 without embedding a foreign window.
+
+On 2026-10-23, a fresh Fedora Linux x86_64 clone was built with only a base XCI
+and update NSP supplied as game files, using the installed Fedora development
+packages. `eh_gen` took 52.9 s; 12 parallel Clang processes compiled all
+2,369 generated C files in 351.3 s (57 with `-O0`, 2,312 with `-O1`). The
+initial guided run exposed macOS-only includes and a QoS call in the runtime;
+after platform guards were added, `install-linux.sh` completed and the Qt/Vulkan
+binary ran for 10 seconds on native Wayland, presenting 306 frames. A warm
+rerun of the guided script regenerated C and linked the guest library in 68 s;
+no source objects needed recompilation. The executable dynamically uses the
+installed system libraries. More detail: [clang-optimierungsstufen.md](../todo/clang-optimierungsstufen.md).
+
+For headless renderer checks use `bash scripts/recomp/linux/local/vk_build.sh`,
+then `bash scripts/recomp/linux/local/vk_run.sh --headless --timeout 40 --screenshot-after 300`.
+Captures are written to `work/recomp/shots/`; the run prints its log to the terminal. The runtime reads its
+module images from `work/recomp/img_gfx` (`BDSP_IMG` changes the folder; `vk_qt.sh` uses the same folder). Create them
+once, with the inputs in place: `IMG=work/recomp/img_gfx HLE_LIST=scripts/recomp/runtime/hle_nvn.txt bash scripts/recomp/runtime/mkimages.sh`.
+The `HLE_LIST` binding matches the macOS app build (`scripts/recomp/app/recomp_build.sh`).
+No display is required for headless rendering. Generated code/data remain under work/.
+
+### 6.3 Run with a window (Wayland)
+
+A window opens on the desktop of the Linux machine. Pass the session variables of the desktop user
+with the run. Get the user ID with `id -u` on the Linux machine. Without these variables no window can open.
+
+```sh
+scripts/recomp/linux/local/vk_run.sh XDG_RUNTIME_DIR=/run/user/<UID> WAYLAND_DISPLAY=wayland-0 \
+  SDL_VIDEODRIVER=wayland BDSP_NO_USER_INPUT=1 --window 1280x720 --timeout 22
+```
+
+`BDSP_NO_USER_INPUT=1` keeps the window from taking keyboard focus when it opens. Whether it also blocks
+the keys below is not verified. Run without it for interactive play.
+
+Settings for window runs only (they have no effect with `--headless`):
+
+- Start size: `--window 1280x720` or `BDSP_WINDOW=1920x1080` (default 1280×720).
+- Window title: the game's own name in the system language (see `docs/recomp-icons.md`, "Window title");
+  `BDSP_WINDOW_TAG=<name>` appends ` [<name>]` so parallel test builds can be told apart.
+- Frame rate: `BDSP_FPS=30`, `BDSP_FPS=60` or `BDSP_FPS=120`. Pass it after the script name, for example
+  `scripts/recomp/linux/local/vk_run.sh BDSP_FPS=60 ...`.
+- MangoHud overlay (fps, frame time, CPU and GPU): `BDSP_MANGOHUD=1`. Needs the `mangohud` package on the
+  Linux machine. It is needed only at run time, not for the build. Off by default.
+- Run time: `--timeout N` in seconds (default 120).
+
+Keys in the window:
+
+- F1 to F4: window size 960×540, 1280×720, 1920×1080, 2560×1440 (not in full screen).
+- F5, F6, F7: frame rate 30, 60, 120.
+- F11: toggle full screen. Not verified.
+
+X11 is not tested.
+
+### 6.3a Qt menu bar and native Wayland
+
+The in-process Qt host supplies menus, keyboard input, pause, window sizes,
+frame-rate choices, and original-icon language selection. For native Wayland:
+
+```sh
+scripts/recomp/linux/local/vk_qt.sh XDG_RUNTIME_DIR=/run/user/<UID> WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland
+```
+
+Use QT_QPA_PLATFORM=xcb with a valid DISPLAY/XAUTHORITY for X11.
+Never commit concrete session IDs or authentication paths.
+
+### 6.4 Known limitations
+
+- **Player character missing, vertex explosions, window fill:** fixed in the last test run (field scene with
+  player character, NPCs and water; window fully filled). Not yet verified across sessions.
+- **Texture outside the guest window:** the runtime logs `[vk] texture outside the guest window`
+  and skips the upload (guard in `textures.c`). Effect on the picture not verified. Open.
+- **Rare hangs on the loading screen:** open. Cause not known.
+- FFmpeg headers/libraries come from matching installed development packages;
+  the Fedora Linux package-only build and short native Wayland run passed on 2026-10-23.
+- **Frame rate:** `BDSP_FPS` caps the frame rate (30, 60, 120). Measured in a window only; not verified across sessions.
+- X11 and full screen (F11) are not tested.
+
+Details: `docs/recomp-linux.md`.
+
+### 6.5 Linux aarch64 (experimental)
+
+`./install-linux.sh` and the graphical installer accept aarch64 and say so. Everything below is what is known today.
+
+- **Needs:** a GPU driver with Vulkan 1.3 (the renderer refuses devices below 1.3) and the same packages as in 6.1;
+  the package names are the same, only the architecture differs. On Debian and Ubuntu the Qt Wayland plugin is
+  searched in `/usr/lib/aarch64-linux-gnu/qt6` as well.
+- **BC textures:** the game uses BC compressed textures. Many ARM GPUs (Mali, some Adreno) support ASTC but not BC.
+  On such a GPU the Vulkan backend converts BC1/2/3/7 into ASTC 4x4 and BC4/5 into R8/RG8 while uploading
+  (the same conversion as the iPhone path, `bctc.c`; BC1 is exact in most blocks, BC2/3/7 lose some quality).
+  GPUs with neither BC nor ASTC get empty textures, and BC6H and 3D BC textures are not converted on any GPU without BC.
+  `BDSP_TEST_NO_BC=1` forces the conversion on a GPU that has BC, for testing on a machine with ASTC.
+  This conversion compiles but has not been run on a real GPU without BC.
+- **Verified on Fedora Asahi Remix aarch64 (16 KiB pages):** the installer's private Python runtime (`--check-runtime`), the native
+  C generator on synthetic inputs, `install-linux.sh --dry-run` (system step, package and tool checks, notice in four languages),
+  the dependency and CPU flag scripts (`-mcpu=native`, `-march=armv8-a` for portable), and CI tests on a 4 KiB page ARM64 runner.
+- **Runtime build (compile and link check on Fedora 43 aarch64, clang, Qt 6, 16 KiB pages):** every runtime C file, the Vulkan NVN layer and
+  the Qt frontend compile, and the runtime links with the Qt frontend once the generated guest objects are present (checked with
+  empty stand-ins for the generated function tables; the binary starts and stops at the missing module images). The stage had stopped at
+  `compat/mach/mach.h` with `unrecognized instruction mnemonic` because the spin wait used the x86 `pause` instruction.
+- **Not verified:** a full game build with the generated objects linked in, the install step after the runtime stage, and rendering.
+  Please report results on GitHub issue 23.
+- Generated code is compiled with `-O1` like on x86-64; the exact-float tests (`docs/recomp-diff.md`, 6.1) found 0 mismatches
+  on arm64 at `-O1`. Do not raise the optimization level without re-running them.
+
+## Windows (x86-64)
+
+Windows 10 22H2 and Windows 11 on x86-64 are supported. Windows on ARM64 is not supported yet.
+
+The Windows build does not ask you to prepare compilers or libraries. The installer downloads **one archive**, the
+*Windows components*, and builds the game with it:
+
+- **What is inside:** Qt 6 (the LLVM-MinGW kit) with the LLVM-MinGW toolchain that Qt pairs with it, SDL3, the Vulkan
+  headers, VMA and shaderc, FFmpeg (BtbN LGPL shared build, 8.x line), hactool, and the native generator (Unicorn 2.1.4, GPL-2.0).
+  The Microsoft Visual C++ runtime is not included (its licence forbids it): the installer asks for Microsoft's redistributable.
+  `NOTICES/` carries the licence overview, the written offer and the source of Qt, FFmpeg and Unicorn. Every input is the newest upstream release at build time; the
+  exact versions and SHA-256 values are recorded in `inputs/` inside the archive and in `windows-components.json`.
+- **Where it comes from:** `.github/workflows/windows-components.yml` builds it on a Windows runner, runs the Windows tests against
+  it, and (weekly, or on request) publishes it as the release `windows-components`. The recipes are `scripts/recomp/resolve_inputs.py`,
+  `resolve_qt.py`, `portable_build.py` and `dependency_build.py`; nothing is pinned in the repository.
+- **Build stages** (driver `--target windows`): extract (`installer/extract`, hactool), generate C, compile, images, UI overlay, runtime,
+  link, package. The game is installed to `%LOCALAPPDATA%\StrahlenderXnu\app`, saves and settings go to `%APPDATA%\StrahlenderXnu`.
+- **Requirements:** Windows 10 22H2 (build 19045) or Windows 11, x86-64, a Vulkan-capable GPU driver, about 40 GB of free space.
+  ARM64 is not supported yet.
+- **Path length:** Windows refuses paths of 260 characters or more to programs that are not long path aware; the native generator is
+  not (no long path manifest), so the Windows long path setting does not help. The build creates paths up to about 157 characters below the
+  work folder (`scripts/install/pathlimits.py` plans the worst cases), so the work folder itself may have at most about 100
+  characters. The preflight computes this and stops with "The install folder is too deep for Windows (N of 260 characters)"
+  instead of the generator's "cannot create output file" in the middle of a build; it is checked again after the extraction
+  with the real game folders. The log line is `Path length check: root N chars, longest generated path M chars, ...`.
+  On Windows the installer's Build options page chooses the build folder (default `%APPDATA%\str-xnu`, the sources and the build
+  live in its `sources` folder) and the install folder (default `%LOCALAPPDATA%\StrahlenderXnu`); both are stored as one-line files
+  `work-folder.txt` and `install-folder.txt` in the installer's `config` folder. `BDSP_INSTALLER_DATA_DIR` still wins for the build
+  folder. The install folder becomes the driver's `--install-root`.
+- **Tests:** the Windows tests run in CI only (`tests.yml` on every push, the toolchain tests inside `windows-components.yml`).
+  They read the unpacked environment through `BDSP_WINDOWS_NATIVE_CC`, `BDSP_WINDOWS_NATIVE_BINARY`, `BDSP_WINDOWS_PRIVATE_CATALOG`
+  and `BDSP_WINDOWS_{SDL,VULKAN,FFMPEG,HACTOOL,QT}_ROOT`.
+- **Known gaps:** redistribution review of the bundled third-party binaries (notices and source offers), hardware acceptance on
+  Windows 10/11 and the controller matrix, ARM64.
+
+## 7. Build stages overview
+
+Stage order: `tools extract recomp`. Run one part with `--only` or
+`--from`/`--to`. Use `--dry-run` first. Each stage writes a marker `work/.stages/<stage>.json` with an input hash.
+If the hash matches, the stage is skipped (`--force` rebuilds it).
+
+| Stage | Purpose | Needed for the apps |
+|---|---|---|
+| `tools` | checks tools, links a usable `hactool` from `PATH` or builds one into `tools/hactool` | yes (for `extract`) |
+| `extract` | decrypts the `.xci`/`.nsp` into `work/exefs`, `work/romfs`, `work/manifest.json` | yes |
+| `recomp` | macOS app from the recompilation | macOS app only |
+
+The Unity-era stages `il2cpp`, `masterdata`, `video`, `audio` and `shaders` were removed (they remain on the branch `unity`).
+
+### 7.1 The `recomp` stage
+
+`scripts/recomp/app/recomp_build.sh` runs seven steps:
+
+1. **Generator:** `work/exefs` modules → C in `work/recomp/gen4` (about 1 GB). Marker `recomp-gen`.
+2. **Compile:** C → objects in `work/recomp/obj4`. The default number of parallel Clang processes is based on available CPUs and total RAM (2 GiB system reserve, about 1.5 GiB per compiler); `--recomp-jobs N` overrides it. Functions above `--recomp-o0-kb` use `-O0`.
+   Marker `recomp-obj`.
+3. **Module images:** `mkimages.sh` with `hle_nvn.txt` → `work/recomp/img_app`.
+4. **Runtime:** `runtime/build.sh` with `BDSP_APP=1` → `work/recomp/bdsp_app`.
+5. **App:** bundle, `Info.plist`, icon, libraries, ad hoc signature.
+6. **Data:** APFS clone of `work/romfs` into Application Support.
+7. **UI overlay:** `scripts/recomp/ui_aspect_patch.py` stretches the UI's fixed 1280x720 rectangles (needed for non-16:9 aspect ratios, see `docs/rendering.md` section 8) into `romfs-patch/` next to the RomFS; skipped when its inputs are unchanged. The Windows pipeline has the same step (`ui_overlay`), the Linux launchers `vk_run.sh` / `vk_qt.sh` run it before the game starts, and `deploy_ios.sh` copies it to the iPad.
+
+### 7.2 The NVN stamp (`prepare.sh`)
+
+`scripts/recomp/runtime/nvn/prepare.sh` prepares the Metal copy of the NVN layer in `work/recomp/nvn-src`.
+
+- The stamp is a SHA-256 over `scripts/recomp/runtime/nvn/src` (all files, sorted), `shader_translator/translate.c`,
+  `shader_translator/shader.h`, and `prepare.sh` itself. The hash is written to `work/recomp/nvn-src/.stamp`.
+- The script copies the sources only when the stamp differs. It does not patch them.
+- `prepare.sh --check` copies nothing and exits 0 if the stamp matches, 1 if not.
+- `prepare.sh --print` prints the source hash. The `recomp` stage uses it in its own hash.
+- Normal builds (`build_nvn.sh`, `build.sh`) call `prepare.sh` for you. They skip it only if `NVN_KEEP=1` is set.
+
+### 7.3 Compiler flags (`flags.inc.sh`)
+
+`scripts/recomp/runtime/nvn/flags.inc.sh` defines the flags shared by the NVN builds:
+`BDSP_OPT="-O1 -g"`, `BDSP_NOWARN="-w"`, `BDSP_WARN_GLUE="-Wall -Wextra -Wno-unused-parameter"`.
+The scripts `build_nvn.sh`, `vulkan/build_vk.sh`, and `ios/build_rt32.sh` source it. Platform defines stay in each script.
+
+## 8. Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `NVN stamp does not match` (from `prepare.sh --check`) | The copy in `work/recomp/nvn-src` is out of date. Run `scripts/recomp/runtime/nvn/prepare.sh`. Normal builds do this automatically. |
+| Build uses old NVN code | `NVN_KEEP=1` is set, so `prepare.sh` was skipped. Unset it or run `prepare.sh`. |
+| `marker matches` … `skipped` / stage skipped | Inputs did not change. Use `--force` to rebuild. |
+| `work/exefs/main missing` (exit 10) | Run stage `extract` first. |
+| Not enough disk space (exit 8) | Free space or deliberately lower the requirement with `--min-free-gb N`. The macOS build needs tens of GB. |
+| Compile fails (exit 4), memory error | Use `--recomp-jobs 2`. Check `work/logs/recomp-compile.log`. |
+| `The base game cannot be unpacked`, `No NCA readable` or `The game NCA cannot be extracted` (exit 5 or 6) | The message and the log name what is wrong with `prod.keys` (names only, never key values): for example the game needs `master_key_0b` but the file stops at `master_key_09`. Dump `prod.keys` again from a console with up-to-date firmware (Lockpick_RCM). The log also shows the master keys of the file and hactool's `Error:` lines. If it says the keys look complete, the `.xci` or `.nsp` is damaged or incomplete. |
+| `No connected, unlocked iPad found.` | Connect the iPad, unlock it, and trust the Mac. Check with `xcrun devicectl list devices`. |
+| Build fails in `xcodebuild` (signing) | Read `work/builds/logs/ios-recomp-xcodebuild.log`. Set `TEAM_ID` and sign in with your account in Xcode. |
+| macOS app blocked on first start | Right-click the app, then Open. |
+
+### 8.1 System report in the installer log (diagnostics)
+
+Every build starts with a block of `[Diagnostics]` lines in the installer log ("Show details"); the first line says that the report stays on the computer and only leaves it if the log is shared. It contains: operating system and build,
+architecture, CPU, RAM, free disk space, the length of the work folder path, locale, whether the installer runs elevated,
+the versions of git, make, the C compiler, cmake, ffmpeg and pkg-config, the GPU with its driver, and per platform:
+
+| Platform | Extra items |
+|---|---|
+| Windows | `LongPathsEnabled`, 8.3 file names, Developer Mode, file system of the work drive, Microsoft Defender status and the number (never the content) of its exclusions, installed antivirus products, Vulkan runtime, VC++ runtime |
+| macOS | model, Rosetta state and whether it is installed, Metal support and GPU cores, Xcode (`xcode-select -p`, `DEVELOPER_DIR`, `xcodebuild -version`), Command Line Tools package, macosx and iphoneos SDK path and version, `actool` and Metal compiler versions, Apple and Homebrew LLVM clang, SDL3 and FFmpeg versions, System Integrity Protection; for an iPhone/iPad build the connected devices (model, iOS version, state; no names or IDs) |
+| Linux | distribution, kernel, display controllers with the kernel driver in use, Vulkan and Mesa version, session type, package manager, SteamOS, Asahi, WSL, Flatpak, AppImage, container |
+
+Run it alone with `python3 scripts/install/diagnostics.py [--work FOLDER]`. Set `BDSP_NO_DIAGNOSTICS=1` to skip it in a build.
+
+Privacy: the report is built only from the operating system's own tools (PowerShell/CIM, `sw_vers`, `sysctl`,
+`system_profiler`, `lspci`, `/proc`, ...), each with a timeout; nothing is sent anywhere and no network is used. A report
+line leaves the machine only if you copy the log. The user name, the home folder, the machine name, serial numbers, MAC
+and IP addresses, hardware UUIDs and any long hex string are replaced by `<user>`, `<home>`, `<host>` and similar before a
+line is written. Environment variables appear by name only (`BDSP_*`), never by value, except plain 0/1/true/false switches.
+
+### 8.2 Attaching your save to a bug report
+
+A save often makes a crash or a stuck game much easier to reproduce, so the bug report form has an optional "Save file" field next to the log.
+It is opt in and nothing is uploaded: you attach the file yourself. **Privacy:** a save holds your trainer name and play data. The export
+holds only the `save_<n>` folders (`SaveData.bin`, `Backup.bin`) and, for a mod app, `mods/<name>/save_<n>`: no keys, firmware or game files, no
+absolute paths. GitHub accepts `.zip` but not `.bin`, so the file is a zip. The issue is public: skip it if you do not want the name public.
+
+- **Installer (all desktop systems):** "Show details", then "Export save for bug report". It writes `bdsp-save-<date>.zip` to the Downloads folder
+  (Desktop, then the home folder, if there is none) and opens that folder. From a terminal:
+  `strahlender-xnu-installer --cli export-save [--out FOLDER] [--save FOLDER]` (same code). It refuses a folder over 64 MiB and says plainly when
+  there is no save.
+- **Where the save is** (the game's File or Game menu has "Open Save Folder"; `BDSP_SAVE` or `--save` moves it):
+
+| Platform | Save folder | Zip it by hand |
+|---|---|---|
+| macOS | `~/Library/Application Support/dev.local.xnubdsp/save/save_1` | Finder: right-click, Compress |
+| Windows | `%APPDATA%\StrahlenderXnu\save\save_1` | Explorer: right-click, Send to, Compressed (zipped) folder |
+| Linux | `${XDG_DATA_HOME:-~/.local/share}/strahlender-xnu/saves/save_1` | file manager, or `zip -r save.zip save_1` |
+| iPhone / iPad | Files app, On My iPhone (or iPad), BDSP, `Saves/save_1` | long press the folder, Compress |
+
+The iPhone and iPad app lists its Documents folder in Files because its `Info.plist` sets `UIFileSharingEnabled` and
+`LSSupportsOpeningDocumentsInPlace`. An app that uses an external game library keeps the save in `Profiles/<game>/<profile>/Saves/save_1` instead.
+
+## 9. More documentation
+
+- `docs/architecture.md`: how the recompilation works.
+- `docs/development.md`: working rules, commands, tests, what lives in `work/`.
+- `docs/recomp-macapp.md`: macOS app, data locations, save import, measurements.
+- `docs/recomp-ios.md`: iPadOS build steps, memory model and entitlements.
+- `docs/recomp-linux.md`: Linux build host and Vulkan backend.
+- `docs/rendering.md`: Metal renderer debugging, performance, frame rate, water.
+- `docs/shaders.md`: shader translator and harness.
+- `docs/saves.md`: save format, validator, locations.

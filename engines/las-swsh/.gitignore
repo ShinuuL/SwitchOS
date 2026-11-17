@@ -1,0 +1,47 @@
+# Arquivos do jogo e chaves: NUNCA versionar
+*.xci
+*.nsp
+*.nca
+*.nso
+*.keys
+prod.keys
+title.keys
+extracted/
+extracted-*/
+generated/
+generated-*/
+
+# Build
+build/
+
+# Repositórios de referência (clonados localmente)
+reference/
+tools/bin/
+.venv/
+logs/
+
+# Gerados pelo runtime ao rodar (saves, caches de shader, configurações locais)
+cache/
+save/
+save-*/
+larecomp.ini
+*.log
+mods/
+
+# Logs que o driver da NVIDIA cria na pasta de trabalho
+NVIDIA Corporation/
+# Fontes do sistema do Switch, tiradas do seu console (fonts/README.md)
+fonts/*.bfttf
+fonts/*.ttf
+
+
+# Evidence with game images / data (tools/swsh/scenario.py, the supervisor): never versioned; the cycle reports
+# (reports/cycles/, reports/baseline/*.md) quote their numbers and paths
+reports/runs/
+reports/captures/
+reports/profiling/
+.agent/runtime/
+__pycache__/
+
+# Estado local do supervisor de engenharia (tools/agent/supervisor.py): não vai para o repositório público
+.agent/

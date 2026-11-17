@@ -1,0 +1,154 @@
+# Builds the phone app (the APK) on GitHub: the payload (the rootfs the phone runs the tools with), the build tools,
+# the app's assets and the APK itself (packaging/android-apk/build_apk.sh). The desktop bundles are the other
+# workflows' (release-windows.yml, release-macos.yml).
+#
+# The payload is a private release (NixPort/nixport-rootfs): the build needs a token with read access to it in the
+# repository's secret NIXPORT_TOKEN (a fine-grained token with that one repository). Everything else is public.
+#
+# The build is the release variant: the APK a player installs, signed with the project's own key (the secret
+# NX2A_KEYSTORE_B64), so it installs over an earlier one instead of beside it.
+#
+# The APK is the run's artifact (nx2android-android-apk), and a published release gets it as an asset named
+# after the version (nx2android-v0.3.0-alpha02.apk). The release carries a second asset: the package of the
+# game profiles (nx2a-profiles-r<version>-<commit>.zip), which the app does not carry - the player imports it
+# into their own folder (the app's environment check has the button).
+#
+# Only a tag builds: a push of the branch builds nothing. The tag is pushed right before the release is made,
+# and the build waits for that release to appear before it attaches the APK to it.
+#
+# A tag's build also tells the QQ group: the announcement (the version, the release's Chinese changelog, the
+# release's page and the netdisk link) goes out once the APK is attached. It is an extra: it never fails the
+# build. The bot's tickets are the repository's secrets (QQBOT_APP_ID, QQBOT_APP_SECRET, QQBOT_GROUP_OPENID).
+name: Android app
+
+on:
+  workflow_dispatch:   # a build of the branch, kept as the run's artifact
+  push:
+    tags: ['v*']      # a tag only: a branch push builds nothing
+
+permissions:
+  contents: write   # the release's assets (the APK)
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'   # the Python the build scripts run on
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'       # the Android Gradle plugin's Java
+      - uses: android-actions/setup-android@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'   # the extractor and the shader translator are C#
+      - name: the SDK parts the build needs
+        run: |
+          sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.3.13750724"
+          yes | sdkmanager --licenses > /dev/null
+      # the payload and the build tools do not depend on the repository: they are fetched once and kept
+      - uses: actions/cache@v4
+        with:
+          path: |
+            packaging/android-apk/.cache/payload-arm64.tar.gz
+            packaging/android-apk/.cache/toolchain
+            packaging/android-apk/.cache/debs
+            packaging/android-apk/.cache/nuget
+          key: nx2a-android-payload-v1
+      - name: the token for the private payload release
+        run: |
+          if [ -z "$NIXPORT_TOKEN" ]; then
+            echo "::error::the secret NIXPORT_TOKEN is missing (a token with read access to NixPort/nixport-rootfs)"
+            exit 1
+          fi
+        env:
+          NIXPORT_TOKEN: ${{ secrets.NIXPORT_TOKEN }}
+      - name: the app's signing key
+        run: |
+          # A release is signed with the project's own key: it must be the key every earlier build was signed
+          # with, or a phone that installed one can never install this one over it. Without the secret the
+          # build falls back to the runner's throwaway debug key - fine for a look, useless for a player.
+          if [ -n "$NX2A_KEYSTORE_B64" ]; then
+            echo "$NX2A_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/nx2android.keystore"
+            echo "NX2A_KEYSTORE=$RUNNER_TEMP/nx2android.keystore" >> "$GITHUB_ENV"
+          else
+            echo "::warning::the secret NX2A_KEYSTORE_B64 is missing: the APK carries the runner's debug key and cannot be installed over an earlier one"
+          fi
+        env:
+          NX2A_KEYSTORE_B64: ${{ secrets.NX2A_KEYSTORE_B64 }}
+      - name: the tests
+        run: |
+          python -m pip install -r requirements.txt
+          python -m unittest discover tests
+      - name: the app
+        run: |
+          export DOTNET="$(which dotnet)"
+          bash packaging/android-apk/build_apk.sh release
+        env:
+          GH_TOKEN: ${{ secrets.NIXPORT_TOKEN }}   # the private payload release
+      - name: the game profiles package
+        # The app does not carry the game profiles (half a gigabyte of shader tables): the player imports a package into
+        # their own folder (the environment check has the button). The APK build cuts it beside the assets (the cache) and
+        # the app carries only its manifest; this step puts the package in the run's artifact.
+        run: ls -la packaging/android-apk/.cache/profiles/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nx2a-game-profiles
+          path: packaging/android-apk/.cache/profiles/*.zip
+          retention-days: 14
+      - name: the APK's name
+        id: apk
+        run: |
+          # The name carries the version, the way the desktop bundles' names do: a build of a tag gets the
+          # tag's own name, a build of the branch the version the app says.
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            ver="${{ github.ref_name }}"
+          else
+            ver="v$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' android/app/build.gradle.kts)"
+          fi
+          echo "name=nx2android-${ver}.apk" >> "$GITHUB_OUTPUT"
+          echo "name: nx2android-${ver}.apk"
+      - name: the APK
+        run: ls -la android/app/build/outputs/apk/release/*.apk
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nx2android-android-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+          retention-days: 14
+      - if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          # The release is made right after the tag is pushed, so it may not be there yet: wait for it, then
+          # attach the APK to it. A release that never shows up leaves the APK in the run's artifact.
+          for i in $(seq 1 36); do
+            if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then break; fi
+            sleep 10
+          done
+          if ! gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::warning::the release ${{ github.ref_name }} is not there yet: the APK stays as this run's artifact"
+            exit 0
+          fi
+          cp android/app/build/outputs/apk/release/app-release.apk "android/app/build/outputs/apk/release/${{ steps.apk.outputs.name }}"
+          gh release upload "${{ github.ref_name }}" "android/app/build/outputs/apk/release/${{ steps.apk.outputs.name }}" --clobber
+          # the profiles package goes with it: a player imports it into their own folder (the app's environment check)
+          for zip in packaging/android-apk/.cache/profiles/*.zip; do
+            [ -f "$zip" ] && gh release upload "${{ github.ref_name }}" "$zip" --clobber
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - if: startsWith(github.ref, 'refs/tags/')
+        name: the QQ group's announcement
+        # The announcement is an extra: a refused token, a group that took the bot out, a link the platform
+        # refuses - none of it may fail the release's build.
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          python devtools/qq_release_announce.py announce --tag "${{ github.ref_name }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QQBOT_APP_ID: ${{ secrets.QQBOT_APP_ID }}
+          QQBOT_APP_SECRET: ${{ secrets.QQBOT_APP_SECRET }}
+          QQBOT_GROUP_OPENID: ${{ secrets.QQBOT_GROUP_OPENID }}

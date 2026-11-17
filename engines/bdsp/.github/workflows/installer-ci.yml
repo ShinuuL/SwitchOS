@@ -1,0 +1,439 @@
+name: Installer packages
+run-name: Installer · ${{ inputs.channel || 'release' }} · ${{ github.ref_name }}
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'artifacts = test only; nightly/release = publish downloads'
+        required: true
+        default: artifacts
+        type: choice
+        options:
+          - artifacts
+          - nightly
+          - release
+      draft:
+        description: 'Keep downloads in a draft so you can edit the message before publishing'
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'installer-v*'
+permissions:
+  contents: read
+concurrency:
+  group: installer-packages-${{ github.ref }}-${{ inputs.channel || 'release' }}
+  cancel-in-progress: false
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      channel: ${{ steps.plan.outputs.channel }}
+      revision: ${{ steps.plan.outputs.revision }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Resolve explicit publication request
+        id: plan
+        env:
+          REQUESTED_CHANNEL: ${{ inputs.channel || 'artifacts' }}
+          DRAFT_RELEASE: ${{ inputs.draft && 'true' || 'false' }}
+        run: |
+          python3 installer/scripts/release.py plan \
+            --event "$GITHUB_EVENT_NAME" --ref "$GITHUB_REF_NAME" \
+            --channel "$REQUESTED_CHANNEL" --draft "$DRAFT_RELEASE" --revision "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --github-output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installer-release-plan
+          path: installer-release-plan.json
+  package:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-aarch64
+            runner: macos-15
+          - target: macos-x86_64
+            runner: macos-15-intel
+          - target: linux-aarch64
+            runner: ubuntu-22.04-arm
+          - target: linux-x86_64
+            runner: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: '1.88'
+      # Smaller and faster cached dev builds; release builds are not affected.
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      BDSP_INSTALLER_UPDATE_PUBLIC_KEY: ${{ vars.INSTALLER_UPDATE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.revision }}
+          fetch-depth: 0 # native generator tests extract the frozen Python reference
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install Linux packaging prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libvulkan-dev squashfs-tools
+      - name: Install macOS native-build prerequisites
+        if: runner.os == 'macOS'
+        run: brew install sdl3 pkg-config
+      - name: Prepare Rust
+        run: rustup toolchain install 1.88 --profile minimal --component rustfmt --component clippy
+      - name: Restore the Rust dependency cache
+        id: rust-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            installer/target
+            installer/extract/target
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('installer/Cargo.lock', 'installer/extract/Cargo.lock', 'installer/rust-toolchain*') }}
+          restore-keys: |
+            rust-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
+      - name: Validate native code
+        run: |
+          python3 -m pip install cryptography
+          cargo +1.88 fmt --manifest-path installer/Cargo.toml -- --check
+          cargo +1.88 test --locked --manifest-path installer/Cargo.toml
+          cargo +1.88 test --locked --manifest-path installer/extract/Cargo.toml
+          cargo +1.88 clippy --locked --manifest-path installer/Cargo.toml -- -D warnings
+          python3 -m unittest scripts.tests.test_compile_queue scripts.tests.test_installer_driver scripts.tests.test_installer_release_runtime scripts.tests.test_installer_runtime_sources scripts.tests.test_installer_release scripts.tests.test_installer_icons scripts.tests.test_installer_paths
+      - name: Build pure Python shader dependency from pinned source
+        run: python3 installer/scripts/build_source_wheel.py tpk_ar --fetch-source --output work/installer-runtime-release/${{ matrix.target }}/wheels
+      - name: Build missing Linux ARM64 wheel from pinned source
+        if: matrix.target == 'linux-aarch64'
+        run: |
+          mkdir -p work/installer-runtime-release/linux-aarch64/wheels
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" -w /workspace \
+            quay.io/pypa/manylinux_2_28_aarch64@sha256:270a5e59af09f02dfc07fe4bb2cb2c5625c76d085cfa47f87dd93d9026eacc75 \
+            /opt/python/cp313-cp313/bin/python installer/scripts/build_source_wheel.py UnityPy \
+            --fetch-source --repair-linux --output work/installer-runtime-release/linux-aarch64/wheels
+      - name: Assemble complete private Python
+        run: bash installer/scripts/prepare_runtime.sh '${{ matrix.target }}'
+      - name: Validate native C generator
+        shell: bash
+        env:
+          BDSP_INSTALLER_PRIVATE_RUNTIME: '1'
+        run: |
+          CODEGEN_PYTHON="$PWD/work/installer-runtime-release/${{ matrix.target }}/runtime/python/bin/python3"
+          "$CODEGEN_PYTHON" -m unittest scripts.tests.test_native_codegen scripts.tests.test_recomp_mod_codegen
+      - name: Package
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          export BDSP_INSTALLER_RUNTIME="$PWD/work/installer-runtime-release/${{ matrix.target }}/runtime"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            bash installer/scripts/package_macos_app.sh
+          else
+            bash installer/scripts/package_linux.sh
+          fi
+      - name: Keep only third-party build output
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: bash installer/scripts/prune_cargo_cache.sh
+      - name: Save the Rust dependency cache
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            installer/target
+            installer/extract/target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+      - name: Smoke test outside checkout
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            "$GITHUB_WORKSPACE/work/installer-packages/macos/Strahlender Installer.app/Contents/MacOS/strahlender-xnu-installer" --check-runtime
+          else
+            APPDIR="$GITHUB_WORKSPACE/work/installer-packages/linux-$(uname -m)/Strahlender.AppDir"
+            cmp "$GITHUB_WORKSPACE/installer/assets/brand/icon.svg" "$APPDIR/strahlender.svg"
+            test -s "$APPDIR/.DirIcon"
+            for size in 16 32 48 64 128 256 512 1024; do
+              test -s "$APPDIR/usr/share/icons/hicolor/${size}x${size}/apps/strahlender.png"
+            done
+            "$APPDIR/AppRun" --check-runtime
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installer-${{ matrix.target }}
+          path: |
+            work/installer-packages/**/installer-*.zip
+            work/installer-packages/**/Strahlender-Installer-*.AppImage
+            work/installer-packages/**/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
+  package-windows:
+    needs: plan
+    runs-on: windows-2022
+    permissions:
+      contents: read
+      actions: read  # downloads the artifact of the windows-components workflow
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: '1.88'
+      # Smaller and faster cached dev builds; release builds are not affected.
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      BDSP_INSTALLER_UPDATE_PUBLIC_KEY: ${{ vars.INSTALLER_UPDATE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.revision }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Prepare Rust
+        run: rustup toolchain install 1.88 --profile minimal --component rustfmt --component clippy
+      - name: Restore the Rust dependency cache
+        id: rust-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            installer/target
+            installer/extract/target
+          key: rust-${{ runner.os }}-${{ runner.arch }}-windows-${{ hashFiles('installer/Cargo.lock', 'installer/extract/Cargo.lock', 'installer/rust-toolchain*') }}
+          restore-keys: |
+            rust-${{ runner.os }}-${{ runner.arch }}-windows-
+      - name: Validate native code
+        run: |
+          cargo +1.88 test --locked --manifest-path installer/Cargo.toml
+          cargo +1.88 test --locked --manifest-path installer/extract/Cargo.toml
+          cargo +1.88 clippy --locked --manifest-path installer/Cargo.toml -- -D warnings
+      - name: Assemble the private Python runtime (CPython and the locked wheels, verified by SHA-256)
+        shell: bash
+        run: |
+          BUILD="work/installer-runtime-release/windows-x86_64"
+          mkdir -p "$BUILD"
+          ASSET="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["targets"][sys.argv[2]]["python_asset"])' installer/runtime/manifest.json windows-x86_64)"
+          curl -fL --retry 3 "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/${ASSET//+/%2B}" -o "$BUILD/python.tar.gz"
+          python installer/scripts/build_source_wheel.py tpk_ar --fetch-source --output "$BUILD/wheels"   # UnityPy's pure-Python dependency exists on PyPI only as source
+          python installer/scripts/assemble_runtime.py --target windows-x86_64 --profile shaders --python-archive "$BUILD/python.tar.gz" --fetch-wheels --wheelhouse "$BUILD/wheels" --source-builds "$BUILD/wheels" --output "$BUILD/runtime"
+      - name: Build the installer
+        run: cargo +1.88 build --release --locked --bins --manifest-path installer/Cargo.toml
+      - name: Fetch the build tools the installer ships (hactool, Vulkan/shaderc, code generator with Unicorn)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $run = gh run list -R "$env:GITHUB_REPOSITORY" --workflow windows-components.yml --branch main --status success --limit 1 --json databaseId -q '.[0].databaseId'
+          if (-not $run) { throw "No successful windows-components run found: start the workflow 'Windows components' first." }
+          gh run download $run -R "$env:GITHUB_REPOSITORY" -n windows-components -D work/windows-tools
+      - name: Package
+        run: python installer/scripts/package_windows.py work/installer-runtime-release/windows-x86_64/runtime work/windows-tools
+      - name: Keep only third-party build output
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: bash installer/scripts/prune_cargo_cache.sh
+      - name: Save the Rust dependency cache
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            installer/target
+            installer/extract/target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+      - name: Smoke test outside the checkout
+        shell: bash
+        run: |
+          rm -rf "$RUNNER_TEMP/unpacked" && mkdir "$RUNNER_TEMP/unpacked"
+          cd work/installer-packages/windows-x86_64
+          sha256sum -c SHA256SUMS
+          cp Strahlender-Installer-x86_64.exe "$RUNNER_TEMP/unpacked/"
+          cd "$RUNNER_TEMP"
+          # One file: the first start unpacks its bundle (runtime, tools, helpers), the second reuses it.
+          ls -l unpacked
+          "unpacked/Strahlender-Installer-x86_64.exe" --check-runtime
+          "unpacked/Strahlender-Installer-x86_64.exe" --check-runtime
+          test "$(ls "$APPDATA/str-xnu/bundle" | wc -l)" = 1
+          # What a user's first start does: the installer sets the Windows environment up from its own tools
+          # (Qt, FFmpeg and SDL3 come from their publishers). It carries no scripts, so it fetches the current main source.
+          helper="$(ls -d "$APPDATA"/str-xnu/bundle/*/)installer_setup.exe"
+          BDSP_INSTALLER_EXE="$PWD/unpacked/Strahlender-Installer-x86_64.exe" "$helper" --install
+          find "$APPDATA/str-xnu/windows-components" -maxdepth 2 -name catalog.json | grep .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installer-windows-x86_64
+          path: |
+            work/installer-packages/windows-x86_64/Strahlender-Installer-x86_64.exe
+            work/installer-packages/windows-x86_64/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
+  universal:
+    needs: [plan, package]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.revision }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: installer-macos-aarch64
+          path: work/universal-inputs/arm
+      - uses: actions/download-artifact@v8
+        with:
+          name: installer-macos-x86_64
+          path: work/universal-inputs/intel
+      - name: Assemble one signed universal Mac installer
+        run: |
+          ARM_ZIP="$(find work/universal-inputs/arm -name installer-macos-aarch64.zip -print -quit)"
+          INTEL_ZIP="$(find work/universal-inputs/intel -name installer-macos-x86_64.zip -print -quit)"
+          bash installer/scripts/package_macos_universal.sh "$ARM_ZIP" "$INTEL_ZIP"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installer-macos-universal
+          path: |
+            work/installer-packages/macos-universal/Strahlender-Installer-macOS-universal.zip
+            work/installer-packages/macos-universal/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
+  verify-universal:
+    needs: [plan, universal]
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: installer-macos-universal
+          path: universal
+      - name: Verify both slices and run the matching bundled runtime
+        run: |
+          cd universal
+          shasum -a 256 -c SHA256SUMS
+          ditto -x -k Strahlender-Installer-macOS-universal.zip "$RUNNER_TEMP/universal-installer"
+          APP="$RUNNER_TEMP/universal-installer/Strahlender Installer.app"
+          for binary in strahlender-xnu-installer ips_patch firmware_import installer_update installer_setup; do
+            lipo "$APP/Contents/MacOS/$binary" -verify_arch arm64
+            lipo "$APP/Contents/MacOS/$binary" -verify_arch x86_64
+          done
+          codesign --verify --deep --strict "$APP"
+          test "$(plutil -extract CFBundleIconName raw -o - "$APP/Contents/Info.plist")" = Installer
+          test "$(plutil -extract LSMinimumSystemVersion raw -o - "$APP/Contents/Info.plist")" = 12.0
+          for resource in Installer.icns Assets.car installer-icon.svg; do
+            test -s "$APP/Contents/Resources/$resource"
+          done
+          cd "$RUNNER_TEMP"
+          env -i HOME="$HOME" PATH=/usr/bin:/bin "$APP/Contents/MacOS/strahlender-xnu-installer" --check-runtime
+  sbom:
+    needs: plan
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Generate SPDX and CycloneDX documents
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cargo fetch --locked --manifest-path installer/Cargo.toml && cargo fetch --locked --manifest-path installer/extract/Cargo.toml
+          # One document per release: the Windows components join in from the last successful windows-components run.
+          mkdir -p windows-inputs
+          RUN="$(gh run list -R "$GITHUB_REPOSITORY" --workflow windows-components.yml --branch main --status success --limit 1 --json databaseId -q '.[0].databaseId')"
+          if [ -n "$RUN" ] && gh run download "$RUN" -R "$GITHUB_REPOSITORY" -n windows-components -D windows-inputs; then
+            python3 scripts/sbom/generate_sbom.py --out sbom --windows-inputs windows-inputs/resolved
+          else
+            echo "No windows-components run yet: SBOM without the Windows components" >> "$GITHUB_STEP_SUMMARY"
+            python3 scripts/sbom/generate_sbom.py --out sbom
+          fi
+          python3 -m unittest scripts.tests.test_generate_sbom
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: sbom/sbom-strahlender-xnu.*
+          if-no-files-found: error
+  sign:
+    # Only a stable release signs. The environment "release" holds the signing seed and asks the owner for approval.
+    needs: [plan, package, package-windows, verify-universal, sbom]
+    if: needs.plan.outputs.channel == 'release'
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.revision }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+      - name: Verify the downloads, then sign the update manifest over exactly those files
+        env:
+          INSTALLER_UPDATE_SEED: ${{ secrets.INSTALLER_UPDATE_SEED }}
+          INSTALLER_UPDATE_PUBLIC_KEY: ${{ vars.INSTALLER_UPDATE_PUBLIC_KEY }}
+        run: |
+          python3 -m pip install cryptography
+          PLAN=artifacts/installer-release-plan/installer-release-plan.json
+          python3 installer/scripts/release.py collect --artifacts artifacts --output release-assets --plan "$PLAN"
+          python3 installer/scripts/release.py sign --folder release-assets --plan "$PLAN"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: update-manifest
+          path: |
+            release-assets/installer-update.json
+            release-assets/installer-update.json.sig
+          if-no-files-found: error
+          retention-days: 1
+  publish:
+    needs: [plan, package, package-windows, verify-universal, sbom, sign]
+    # sign only runs for stable releases; every other job must have succeeded (a cancelled or skipped one stops the release)
+    if: >-
+      always() && needs.plan.outputs.channel != 'artifacts' &&
+      needs.package.result == 'success' && needs.package-windows.result == 'success' &&
+      needs.verify-universal.result == 'success' && needs.sbom.result == 'success' &&
+      (needs.sign.result == 'success' || (needs.plan.outputs.channel != 'release' && needs.sign.result == 'skipped'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.revision }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+      - name: Verify and collect the three public installers
+        run: |
+          python3 installer/scripts/release.py collect --artifacts artifacts --output release-assets \
+            --plan artifacts/installer-release-plan/installer-release-plan.json
+      - name: Add the signed update manifest (stable releases)
+        if: needs.plan.outputs.channel == 'release'
+        run: cp artifacts/update-manifest/installer-update.json artifacts/update-manifest/installer-update.json.sig release-assets/
+      - name: Publish explicitly requested installer release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 installer/scripts/release.py publish --folder release-assets \
+            --plan artifacts/installer-release-plan/installer-release-plan.json --repository "$GITHUB_REPOSITORY"

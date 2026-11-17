@@ -1,0 +1,482 @@
+// Dispatcher of the BDSP runtime: guest address -> recompiled function (4 tables), HLE slots, re-entry of the
+// exception mechanism (landing pads, setjmp returns), abort and crash messages. Own code.
+#ifndef _WIN32
+#include <dlfcn.h>
+#include <execinfo.h>
+#endif
+#include <signal.h>
+#include <stdarg.h>
+#include <unistd.h>
+
+#include "bdsp.h"
+
+extern const uint64_t main_fn_addrs[]; extern const GuestFn main_fn_ptrs[]; extern const uint64_t main_fn_count;
+extern const uint64_t sdk_fn_addrs[]; extern const GuestFn sdk_fn_ptrs[]; extern const uint64_t sdk_fn_count;
+extern const uint64_t subsdk0_fn_addrs[]; extern const GuestFn subsdk0_fn_ptrs[]; extern const uint64_t subsdk0_fn_count;
+extern const uint64_t rtld_fn_addrs[]; extern const GuestFn rtld_fn_ptrs[]; extern const uint64_t rtld_fn_count;
+#if BDSP_HAS_SUBSDK1
+extern const uint64_t subsdk1_fn_addrs[]; extern const GuestFn subsdk1_fn_ptrs[]; extern const uint64_t subsdk1_fn_count;
+#endif
+
+typedef struct { const uint64_t *addrs; const GuestFn *fns; uint64_t count, lo, hi; } FnTable;
+static FnTable tables[4 + BDSP_HAS_SUBSDK1];
+volatile int g_fnprof;
+
+// ---- HLE slots: fake addresses HLE_BASE + 16 * i
+#define MAX_HLE 4096
+static struct { char *name; HostFn fn; uint64_t calls, ncall; } hle_slots[MAX_HLE];
+static int hle_count;
+static pthread_mutex_t hle_lock = PTHREAD_MUTEX_INITIALIZER;
+
+uint64_t hle_register(const char *name, HostFn fn) {
+    pthread_mutex_lock(&hle_lock);
+    for (int i = 0; i < hle_count; i++)
+        if (!strcmp(hle_slots[i].name, name)) {
+            if (fn && !hle_slots[i].fn) hle_slots[i].fn = fn;
+            pthread_mutex_unlock(&hle_lock);
+            return HLE_BASE + 16ull * i;
+        }
+    if (hle_count == MAX_HLE) { pthread_mutex_unlock(&hle_lock); rt_fatal("zu viele HLE-Slots\n"); }
+    hle_slots[hle_count].name = strdup(name);
+    hle_slots[hle_count].fn = fn;
+    uint64_t a = HLE_BASE + 16ull * hle_count++;
+    pthread_mutex_unlock(&hle_lock);
+    return a;
+}
+
+// ---- Watch addresses (gate detection): counted and logged on every call through rt_dispatch
+#define MAX_WATCH 32
+static struct { uint64_t addr; char name[48]; uint64_t hits; } watches[MAX_WATCH];
+static int nwatch;
+volatile uint64_t g_watch_hits;
+void watch_add(uint64_t addr, const char *name) {
+    if (nwatch == MAX_WATCH) return;
+    watches[nwatch].addr = addr;
+    snprintf(watches[nwatch].name, sizeof watches[nwatch].name, "%s", name);
+    nwatch++;
+}
+static uint64_t g_nle_enters, g_nle_frames;
+void gate_report(FILE *f) {
+    fprintf(f, "Exception-/longjmp-Wiedereinstiege: %llu (abgewickelte Host-Rahmen %llu)\n", (unsigned long long)g_nle_enters, (unsigned long long)g_nle_frames);
+    for (int i = 0; i < nwatch; i++)
+        fprintf(f, "  Watch %s @%llx: %llu calls through the dispatcher\n", watches[i].name, (unsigned long long)watches[i].addr, (unsigned long long)watches[i].hits);
+}
+
+// BDSP_IL2SYM=<tsv> (address hex <TAB> name, ascending; generated from the IL2CPP metadata): report every IL2CPP method on its first call
+static struct { uint64_t addr; char *name; } *il2_syms;
+static char *il2_seen;
+static size_t il2_n;
+static void il2_load(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    size_t cap = 0;
+    char line[1024];
+    while (fgets(line, sizeof line, f)) {
+        char *tab = strchr(line, '\t');
+        if (!tab) continue;
+        *tab = 0;
+        tab++;
+        tab[strcspn(tab, "\n")] = 0;
+        if (il2_n == cap) { cap = cap ? cap * 2 : 1 << 16; il2_syms = realloc(il2_syms, cap * sizeof *il2_syms); }
+        il2_syms[il2_n].addr = strtoull(line, NULL, 16);
+        il2_syms[il2_n].name = strdup(tab);
+        il2_n++;
+    }
+    fclose(f);
+    il2_seen = calloc(il2_n + 1, 1);
+}
+static int il2_cmp(const void *a, const void *b) {
+    uint64_t x = ((const typeof(*il2_syms) *)a)->addr, y = ((const typeof(*il2_syms) *)b)->addr;
+    return x < y ? -1 : x > y;
+}
+static void il2_hit(uint64_t a) {
+    size_t lo = 0, hi = il2_n;
+    while (lo < hi) {
+        size_t m = (lo + hi) / 2;
+        if (il2_syms[m].addr < a) lo = m + 1; else hi = m;
+    }
+    if (lo >= il2_n || il2_syms[lo].addr != a) return;
+    if (__atomic_exchange_n(&il2_seen[lo], 1, __ATOMIC_RELAXED)) return;
+    KThread *kt = kernel_current_thread();
+    static uint64_t t0;
+    uint64_t ms = rt_now_ns() / 1000000;
+    if (!t0) t0 = ms;
+    fprintf(stderr, "[il2] %6llu ms t%llu %s\n", (unsigned long long)(ms - t0), (unsigned long long)(kt ? kt->id : 0), il2_syms[lo].name);
+}
+// ---- Function ring (BDSP_FNPROF=1: every function entry costs a call)
+#define RING 4096
+static __thread uint64_t ring_fn[RING], ring_lr[RING];
+static __thread unsigned ring_pos;
+static struct { uint64_t tid; uint64_t *fn, *lr; unsigned *pos; } ring_reg[128];
+static int ring_nreg;
+uint64_t g_count_addr[4], g_count_hits[4];
+int g_count_n;
+void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
+    (void)x0;
+    if (g_count_n) {   // BDSP_COUNT_FN: only count the listed functions
+        for (int i = 0; i < g_count_n; i++)
+            if (a == g_count_addr[i]) __atomic_fetch_add(&g_count_hits[i], 1, __ATOMIC_RELAXED);
+        return;
+    }
+    static __thread int registered;
+    if (il2_n) il2_hit(a);
+    if (!registered) {
+        registered = 1;
+        KThread *kt = kernel_current_thread();
+        int i = __atomic_fetch_add(&ring_nreg, 1, __ATOMIC_SEQ_CST);
+        if (i < 128) { ring_reg[i].tid = kt ? kt->id : 0; ring_reg[i].fn = ring_fn; ring_reg[i].lr = ring_lr; ring_reg[i].pos = &ring_pos; }
+    }
+    ring_fn[ring_pos & (RING - 1)] = a; ring_lr[ring_pos & (RING - 1)] = lr; ring_pos++;
+}
+// BDSP_RINGDUMP=n (with BDSP_FNPROF=1): the last n function entries of the threads with more than 50 entries in the result log
+void fnprof_report(FILE *f, unsigned n) {
+    for (int i = 0; i < ring_nreg && i < 128; i++) {
+        unsigned pos = *ring_reg[i].pos;
+        if (pos < 50) continue;
+        fprintf(f, "Thread %llu: %u function entries, the last %u (oldest first, caller):\n", (unsigned long long)ring_reg[i].tid, pos, n);
+        for (unsigned k = n; k-- > 0;) {
+            if (pos < k + 1) continue;
+            unsigned j = (pos - 1 - k) & (RING - 1);
+            uint64_t off = 0, off2 = 0;
+            const char *s = loader_symbol_at(ring_reg[i].fn[j], &off);
+            fprintf(f, "  %llx %s+%llx (lr %llx)\n", (unsigned long long)ring_reg[i].fn[j], s ? s : "", (unsigned long long)off, (unsigned long long)ring_reg[i].lr[j]);
+            (void)off2;
+        }
+    }
+}
+
+void dispatch_init(void) {
+    tables[0] = (FnTable){main_fn_addrs, main_fn_ptrs, main_fn_count, main_fn_addrs[0], main_fn_addrs[main_fn_count - 1]};
+    tables[1] = (FnTable){sdk_fn_addrs, sdk_fn_ptrs, sdk_fn_count, sdk_fn_addrs[0], sdk_fn_addrs[sdk_fn_count - 1]};
+    tables[2] = (FnTable){subsdk0_fn_addrs, subsdk0_fn_ptrs, subsdk0_fn_count, subsdk0_fn_addrs[0], subsdk0_fn_addrs[subsdk0_fn_count - 1]};
+    tables[3] = (FnTable){rtld_fn_addrs, rtld_fn_ptrs, rtld_fn_count, rtld_fn_addrs[0], rtld_fn_addrs[rtld_fn_count - 1]};
+#if BDSP_HAS_SUBSDK1
+    if (!subsdk1_fn_count) rt_fatal("subsdk1 has no compiled function table\n");
+    tables[4] = (FnTable){subsdk1_fn_addrs, subsdk1_fn_ptrs, subsdk1_fn_count, subsdk1_fn_addrs[0], subsdk1_fn_addrs[subsdk1_fn_count - 1]};
+#endif
+    if (getenv("BDSP_FNPROF")) g_fnprof = 1;
+    for (const char *p = getenv("BDSP_COUNT_FN"); p && *p && g_count_n < 4;) {
+        g_count_addr[g_count_n++] = strtoull(p, (char **)&p, 16);
+        while (*p == ',') p++;
+        g_fnprof = 1;
+    }
+    if (getenv("BDSP_IL2SYM")) {
+        il2_load(getenv("BDSP_IL2SYM"));
+        if (il2_n) qsort(il2_syms, il2_n, sizeof *il2_syms, il2_cmp);
+        g_fnprof = 1;
+    }
+}
+
+GuestFn dispatch_lookup(uint64_t addr) {
+    for (size_t t = 0; t < sizeof tables / sizeof tables[0]; t++) {
+        FnTable *ft = &tables[t];
+        if (addr < ft->lo || addr > ft->hi) continue;
+        uint64_t lo = 0, hi = ft->count;
+        while (lo < hi) {
+            uint64_t mid = (lo + hi) / 2;
+            if (ft->addrs[mid] < addr) lo = mid + 1; else hi = mid;
+        }
+        if (lo < ft->count && ft->addrs[lo] == addr) return ft->fns[lo];
+    }
+    return NULL;
+}
+
+#define DCACHE 4096
+static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
+
+static __thread int t_hle_slot = -1;
+int hle_current_slot(void) { return t_hle_slot; }  // slot of the HLE call currently running (valid only inside the host function)
+const char *hle_slot_name(int i) { return i >= 0 && i < hle_count ? hle_slots[i].name : "?"; }
+
+// Imports without a host implementation that the guest has called (name, call count): the missing NVN functions of gate 2
+int hle_unimpl_report(FILE *f) {
+    int n = 0;
+    for (int i = 0; i < hle_count; i++)
+        if (!hle_slots[i].fn && hle_slots[i].calls) { fprintf(f, "  missing: %s: %llu calls\n", hle_slots[i].name, (unsigned long long)hle_slots[i].calls); n++; }
+    return n;
+}
+
+static void hle_unimplemented(Cpu *c) { c->x[0] = 0; }
+
+// Call counts of all host functions (name, count), descending; BDSP_NVN_STATS=1 prints them in the result log
+void hle_stats_report(FILE *f) {
+    int *idx = malloc(sizeof(int) * hle_count), n = 0;
+    for (int i = 0; i < hle_count; i++) if (hle_slots[i].ncall) idx[n++] = i;
+    for (int a = 0; a < n; a++)
+        for (int b = a + 1; b < n; b++)
+            if (hle_slots[idx[b]].ncall > hle_slots[idx[a]].ncall) { int t = idx[a]; idx[a] = idx[b]; idx[b] = t; }
+    fprintf(f, "Host-Funktionen (HLE) aufgerufen: %d verschiedene\n", n);
+    for (int a = 0; a < n; a++) fprintf(f, "  %8llu  %s\n", (unsigned long long)hle_slots[idx[a]].ncall, hle_slots[idx[a]].name);
+    free(idx);
+}
+
+static GuestFn dispatch_slow(Cpu *c) {
+    uint64_t pc = c->pc;
+    if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
+        int i = (int)((pc - HLE_BASE) / 16);
+        if (i < hle_count) {
+            t_hle_slot = i;
+            __atomic_add_fetch(&hle_slots[i].ncall, 1, __ATOMIC_RELAXED);
+            static int trace = -1;   // BDSP_TRACE_HLE=<n>: log the first n calls of the host functions with thread and arguments (except nvnDeviceGetProcAddress)
+            if (trace < 0) trace = getenv("BDSP_TRACE_HLE") ? atoi(getenv("BDSP_TRACE_HLE")) : 0;
+            if (trace > 0 && strcmp(hle_slots[i].name, "nvnDeviceGetProcAddress") && __atomic_fetch_sub(&trace, 1, __ATOMIC_RELAXED) > 0) {
+                KThread *kt = kernel_current_thread();
+                LOG("[hle] T%llu %s(%llx, %llx, %llx, %llx) lr=%llx\n", (unsigned long long)(kt ? kt->id : 0), hle_slots[i].name, (unsigned long long)c->x[0],
+                    (unsigned long long)c->x[1], (unsigned long long)c->x[2], (unsigned long long)c->x[3], (unsigned long long)c->x[30]);
+            }
+            if (hle_slots[i].fn) return hle_slots[i].fn;
+            if (hle_slots[i].calls++ < 3)
+                LOG("[hle] unimplemented import %s (x0=%llx x1=%llx lr=%llx) -> 0\n", hle_slots[i].name, (unsigned long long)c->x[0],
+                    (unsigned long long)c->x[1], (unsigned long long)c->x[30]);
+            return hle_unimplemented;
+        }
+    }
+    GuestFn f = dispatch_lookup(pc);
+    for (int i = 0; i < nwatch; i++)
+        if (watches[i].addr == pc) {
+            uint64_t n = __atomic_add_fetch(&watches[i].hits, 1, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_watch_hits, 1, __ATOMIC_RELAXED);
+            if (n <= 5)
+                LOG("[gate] %s aufgerufen (#%llu), x0=%llx x1=%llx lr=%llx\n", watches[i].name, (unsigned long long)n, (unsigned long long)c->x[0],
+                    (unsigned long long)c->x[1], (unsigned long long)c->x[30]);
+            bdsp_gate_hit(watches[i].name);
+            return f;  // not into the cache: every call passes through here again
+        }
+    if (!f) return NULL;
+    unsigned h = (unsigned)(pc >> 2) & (DCACHE - 1);
+    dcache[h].addr = pc;
+    dcache[h].fn = f;
+    return f;
+}
+
+void rt_nle_fatal(Cpu *c) {
+    rt_fatal("unbekannter Wiedereinstiegspunkt %llx (lr=%llx)\n", (unsigned long long)c->pc, (unsigned long long)c->x[30]);
+}
+
+// Jump into the middle of a guest function (landing pad after _Unwind, return behind setjmp): innermost frame record whose
+// range contains the address and whose entry SP is above the target SP (recursive calls sit deeper).
+void rt_nle_enter(Cpu *c) {
+    EhRec *top = EH_TOP(c);
+    for (EhRec *r = top; r; r = r->prev)
+        if (c->pc >= r->lo && c->pc < r->hi && r->sp > c->sp) {
+            for (EhRec *q = top; q != r; q = q->prev) __atomic_add_fetch(&g_nle_frames, 1, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_nle_enters, 1, __ATOMIC_RELAXED);
+            EH_TOP(c) = r;
+            EH_LONGJMP(r->jb, 1);
+        }
+    uint64_t off = 0;
+    const char *s = loader_symbol_at(c->x[30], &off);
+    rt_fatal("no guest code at %llx (lr=%llx %s+%llx): jump into data or without a function\n", (unsigned long long)c->pc, (unsigned long long)c->x[30],
+             s ? s : "?", (unsigned long long)off);
+}
+
+// Always calls as a tail call, so chains of indirect jumps do not grow the host stack.
+void rt_dispatch(Cpu *c) {
+    unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);
+    GuestFn f = dcache[h].addr == c->pc ? dcache[h].fn : dispatch_slow(c);
+    if (__builtin_expect(!f, 0)) rt_nle_enter(c);
+    __attribute__((musttail)) return f(c);
+}
+
+void guest_call(Cpu *c, uint64_t addr) {
+    uint64_t lr = c->x[30], pc = c->pc;
+    c->x[30] = 0;
+    c->pc = addr;
+    rt_dispatch(c);
+    c->x[30] = lr;
+    c->pc = pc;
+}
+
+void rt_udf(Cpu *c, uint64_t pc) {
+    uint64_t off = 0;
+    const char *s = loader_symbol_at(pc, &off);
+    rt_fatal("UDF/unimplemented instruction at %llx (%s+%llx), lr=%llx\n", (unsigned long long)pc, s ? s : "?", (unsigned long long)off, (unsigned long long)c->x[30]);
+}
+void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) {
+    uint64_t off = 0;
+    const char *s = loader_symbol_at(pc, &off);
+    rt_fatal("BRK #%u bei %llx (%s+%llx), lr=%llx\n", imm, (unsigned long long)pc, s ? s : "?", (unsigned long long)off, (unsigned long long)c->x[30]);
+}
+
+// ---- Host memory inside the guest window
+static uint64_t hle_next = HLE_HEAP;
+void *hle_alloc(uint64_t size) {
+    static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&m);
+    uint64_t a = hle_next;
+    hle_next += (size + 63) & ~63ull;
+    if (hle_next > HLE_HEAP + HLE_HEAP_SIZE) { pthread_mutex_unlock(&m); rt_fatal("HLE heap exhausted\n"); }
+    pthread_mutex_unlock(&m);
+    memset(G2H(a), 0, size);
+    return G2H(a);
+}
+
+// ---- Abort and crash
+static void print_guest_regs(Cpu *c) {
+    LOG("Guest: sp=%llx lr=%llx fp=%llx\n", (unsigned long long)c->sp, (unsigned long long)c->x[30], (unsigned long long)c->x[29]);
+    for (int i = 0; i < 28; i += 4)
+        LOG("  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx\n", i, (unsigned long long)c->x[i], i + 1, (unsigned long long)c->x[i + 1],
+            i + 2, (unsigned long long)c->x[i + 2], i + 3, (unsigned long long)c->x[i + 3]);
+    uint64_t fp = c->x[29];
+    uint64_t off = 0;
+    const char *s0 = loader_symbol_at(c->x[30], &off);
+    LOG("Guest backtrace (return addresses):\n  lr  %llx %s+%llx\n", (unsigned long long)c->x[30], s0 ? s0 : "?", (unsigned long long)off);
+    for (int n = 0; n < 24 && fp >= STACK_BASE && fp < STACK_BASE + STACK_SIZE; n++) {
+        uint64_t lr = *G2H64(fp + 8);
+        const char *s = loader_symbol_at(lr, &off);
+        LOG("  #%d %llx %s+%llx\n", n, (unsigned long long)lr, s ? s : "?", (unsigned long long)off);
+        uint64_t next = *G2H64(fp);
+        if (next <= fp) break;
+        fp = next;
+    }
+    if (g_fnprof) {
+        LOG("last guest functions (newest last, caller):\n");
+        unsigned nring = getenv("BDSP_RING") ? (unsigned)atoi(getenv("BDSP_RING")) : 16;
+        if (nring > RING) nring = RING;
+        for (unsigned i = nring; i-- > 0;) {
+            if (ring_pos < i + 1) continue;
+            unsigned k = (ring_pos - 1 - i) & (RING - 1);
+            LOG("  %llx (lr %llx)\n", (unsigned long long)ring_fn[k], (unsigned long long)ring_lr[k]);
+        }
+    }
+}
+
+void rt_fatal_trace(void) {
+    Cpu *c = kernel_current_cpu();
+    if (c) print_guest_regs(c);
+    // BDSP_DUMP="address[:words],…" (hex): print guest memory on abort
+    const char *d = getenv("BDSP_DUMP");
+    while (d && *d) {
+        char *end;
+        uint64_t a = strtoull(d, &end, 16);
+        unsigned n = 16;
+        if (*end == ':') n = (unsigned)strtoul(end + 1, &end, 10);
+        LOG("dump %llx:", (unsigned long long)a);
+        for (unsigned i = 0; i < n; i++) LOG(" %08x", *G2H32(a + 4ull * i));
+        LOG("\n");
+        d = *end == ',' ? end + 1 : end;
+        if (end == d && *d) break;
+    }
+    fflush(NULL);
+}
+
+static void wait_for_fatal_report(void) __attribute__((noreturn));
+static void wait_for_fatal_report(void) {
+#ifdef _WIN32
+    for (;;) Sleep(INFINITE);
+#else
+    for (;;) pause();
+#endif
+}
+
+void rt_fatal(const char *fmt, ...) {
+    static volatile int once;
+    if (__atomic_exchange_n(&once, 1, __ATOMIC_SEQ_CST)) wait_for_fatal_report();
+    char buf[1024];
+    va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
+    LOG("FATAL: %s", buf);
+#ifdef _WIN32
+    if (!bdsp_win32_crash_write(buf, (DWORD)strlen(buf)))
+        LOG("FATAL: runtime abort could not be recorded in the Windows crash log\n");
+#endif
+    rt_fatal_trace();
+    bdsp_fatal_report("Abort by the runtime (see FATAL)", 3);  // does not return: the main thread writes the report and ends the process
+    wait_for_fatal_report();
+}
+
+#ifdef _WIN32
+static LONG WINAPI crash_handler(EXCEPTION_POINTERS *exception) {
+    char message[256];
+#if defined(__x86_64__)
+    uint64_t pc = exception->ContextRecord->Rip, sp = exception->ContextRecord->Rsp;
+#elif defined(__aarch64__)
+    uint64_t pc = exception->ContextRecord->Pc, sp = exception->ContextRecord->Sp;
+#else
+#error Unsupported Windows crash context
+#endif
+    int length = snprintf(message, sizeof message,
+        "\r\nFATAL: unhandled Windows exception 0x%08lx at host PC 0x%llx, SP 0x%llx.\r\n",
+        exception->ExceptionRecord->ExceptionCode, (unsigned long long)pc, (unsigned long long)sp);
+    if (length > 0 && (size_t)length < sizeof message) {
+        DWORD written;
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), message, (DWORD)length, &written, NULL);
+        OutputDebugStringA(message);
+        if (!bdsp_win32_crash_write(message, (DWORD)length)) {
+            static const char failed[] = "FATAL: Windows crash log write failed.\r\n";
+            WriteFile(GetStdHandle(STD_ERROR_HANDLE), failed, sizeof failed - 1, &written, NULL);
+        }
+    }
+    // Do not allocate, lock or dereference guest memory on a damaged host stack.
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static INIT_ONCE crash_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK install_crash_handler(PINIT_ONCE once, PVOID parameter, PVOID *context) {
+    (void)once; (void)parameter; (void)context;
+    SetUnhandledExceptionFilter(crash_handler);
+    return TRUE;
+}
+
+void crash_handler_install(void) {
+    ULONG stack = 32768;
+    if (!SetThreadStackGuarantee(&stack) ||
+        !InitOnceExecuteOnce(&crash_once, install_crash_handler, NULL, NULL))
+        rt_fatal("Windows crash handler initialization failed (%lu)\n", GetLastError());
+}
+#else
+// Where the faulting host instruction was and which register held the bad base (the guest registers of the report are only the last
+// synchronised copy). A fault below 4 GiB inside the compact layout is checked for a guest pointer whose high word was lost.
+static void crash_fault_report(int sig, siginfo_t *si, void *ctx) {
+    uint64_t addr = (uint64_t)(uintptr_t)si->si_addr;
+    (void)sig;
+#ifdef BDSP_COMPACT_BASE
+    if ((sig == SIGSEGV || sig == SIGBUS) && addr < (1ull << 32)) {
+        uint64_t full = ((uint64_t)BDSP_COMPACT_BASE & ~0xFFFFFFFFull) | addr;
+        if (full >= GUEST_LO && full < GUEST_HI)
+            LOG("[fault] %llx is below 4 GiB; %llx in the guest window would be valid: a 64-bit guest pointer was cut to 32 bits\n",
+                (unsigned long long)addr, (unsigned long long)full);
+    }
+#endif
+#if defined(__APPLE__) && defined(__aarch64__)
+    const ucontext_t *uc = ctx;
+    if (!uc || !uc->uc_mcontext) return;
+    const _STRUCT_ARM_THREAD_STATE64 *ss = &uc->uc_mcontext->__ss;
+    LOG("[fault] host pc %llx lr %llx sp %llx, fault address %llx\n", (unsigned long long)__darwin_arm_thread_state64_get_pc(*ss),
+        (unsigned long long)__darwin_arm_thread_state64_get_lr(*ss), (unsigned long long)__darwin_arm_thread_state64_get_sp(*ss),
+        (unsigned long long)addr);
+    for (int i = 0; i < 29; i++) {
+        uint64_t v = ss->__x[i];
+        LOG("[fault] x%d %016llx%s\n", i, (unsigned long long)v, (v <= addr && addr - v < 0x1000) ? "  <- base of the faulting access" : "");
+    }
+#else
+    (void)ctx;
+#endif
+}
+
+static void crash_handler(int sig, siginfo_t *si, void *ctx) {
+    static volatile int once;
+    if (sig != SIGTRAP && __atomic_exchange_n(&once, 1, __ATOMIC_SEQ_CST)) { for (;;) pause(); }
+    LOG("\n*** Signal %d at host address %p\n", sig, si->si_addr);
+    if (sig == SIGSEGV || sig == SIGBUS) crash_fault_report(sig, si, ctx);
+    void *bt[48];
+    int n = backtrace(bt, 48);
+    char **syms = backtrace_symbols(bt, n);
+    for (int i = 0; i < n; i++) LOG("  %s\n", syms ? syms[i] : "?");
+    rt_fatal_trace();
+    bdsp_fatal_report("Crash in guest code (signal)", 139);
+    for (;;) pause();
+}
+
+void crash_handler_install(void) {
+    stack_t ss = {.ss_sp = malloc(1 << 20), .ss_size = 1 << 20};
+    sigaltstack(&ss, NULL);
+    struct sigaction sa = {0};
+    sa.sa_sigaction = crash_handler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+    sigaction(SIGTRAP, &sa, NULL);
+}
+#endif

@@ -1,0 +1,40 @@
+# Builds the Linux bundles (packaging/build_bundle.py), x64 and arm64: the desktop app, for a player who
+# ports on a computer.
+#
+# The phone app is the other workflow's (android-apk.yml), and this line's release carries that one only.
+# This bundle is not built on a published release: it is built by hand when it is wanted (Actions -> this
+# workflow -> Run workflow), and it stays as the run's artifact.
+#
+# x64 on ubuntu-latest; arm has no such alias, so it is pinned to an Ubuntu 24.04 arm image (bump it when x64
+# latest moves). The bundle carries the system libraries of the runner that made it (glibc among them), so a
+# 24.04 build runs on Ubuntu 24.04+, Debian 13+, Mint 22 and the rolling distributions.
+name: Linux release
+
+on:
+  workflow_dispatch:   # a build of the branch, kept as the run's artifact
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-latest, cpu: x64 }
+          - { runner: ubuntu-24.04-arm, cpu: arm64 }   # GitHub's arm partner image: the same toolset the tests need (cc, jdk), free in public repos
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # the tags: git describe names the bundle
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'   # the Python the Windows zips ship with too
+      - run: python -m pip install -r requirements.txt pyinstaller
+      - run: python -m unittest discover tests
+      - run: python packaging/build_bundle.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nx2android-linux-${{ matrix.cpu }}
+          path: dist/nx2android-*-linux-*.zip

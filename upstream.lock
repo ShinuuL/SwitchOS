@@ -1,0 +1,8 @@
+{
+  "las-za": {"url": "https://github.com/Hexveil404/PokeZ-ARecomp", "commit": "2c953756d7518b99519660d526e8a1fbfd2516c3", "license": "MIT License", "path": "engines/las-za"},
+  "las-swsh": {"url": "https://github.com/raulzrrs/swsh-recomp", "commit": "784eaa5762edd0ccb77ffb20e80809c73783c8f3", "license": "MIT License", "path": "engines/las-swsh"},
+  "las-arceus": {"url": "https://github.com/CarlosExabyte/Arceuszada", "commit": "3d44186ef447d008e68258e44340ce1658c19655", "license": "MIT License", "path": "engines/las-arceus"},
+  "totk": {"url": "https://github.com/valentderah/totk-pc-recomp", "commit": "6151ac4fbc2c490207116609fbf4974b01843763", "license": "MIT License", "path": "engines/totk"},
+  "bdsp": {"url": "https://github.com/Veemyu/strahlender-xnu", "commit": "fb514dbc81f960609d3c2857326280fe15f56704", "license": "MIT License", "path": "engines/bdsp"},
+  "android": {"url": "https://github.com/zFitness/nx2androidX", "commit": "d146a8d112d3875c32620e9a81dde1b402a376ef", "license": "GNU GENERAL PUBLIC LICENSE", "path": "android"}
+}

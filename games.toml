@@ -1,0 +1,54 @@
+# SwitchOS - catálogo de jogos
+# Cada jogo: Title ID do Switch (chave da sincronização), onde o PC guarda o save
+# e o executável que o lança. Caminhos aceitam %VAR% / ~ e são relativos à raiz do SwitchOS.
+# Android: todos os jogos rodam no app nx2androidX (br.com.mastersys.switchos), save em files/save/<titleId>.
+
+[sync]
+# Pasta compartilhada (Google Drive, OneDrive, Syncthing...) usada como "nuvem" dos saves.
+cloud_dir = "~/SwitchOS-Saves"
+android_package = "br.com.mastersys.switchos"
+keep_backups = 10
+
+[games.za]
+name = "Pokémon Legends: Z-A"
+title_id = "0100F43008C44000"
+project = "engines/las-za"
+pc_save = "engines/las-za/build/dist-za/ZA Recomp/save/save_0"
+pc_exe = "engines/las-za/build/dist-za/ZA Recomp/lasrecomp.exe"
+pc_args = ["--play", "D:/Games/SwitchOS/za"]
+
+[games.arceus]
+name = "Pokémon Legends: Arceus"
+title_id = "01001F5010DFA000"
+project = "engines/las-za"   # roda no runtime LAS unificado (subsdk0/1 suportados); scripts antigos em engines/las-arceus
+pc_save = "engines/las-za/build/dist-za/ZA Recomp/save/01001f5010dfa000/save_0"
+pc_exe = "engines/las-za/build/dist-za/ZA Recomp/lasrecomp.exe"
+pc_args = ["--play", "D:/Games/SwitchOS/arceus"]   # pasta com exefs/, romfs.bin e lasgame.dll
+
+[games.sword]
+name = "Pokémon Sword"
+title_id = "0100ABF008968000"
+project = "engines/las-swsh"
+pc_save = "engines/las-swsh/save/save_0"
+pc_exe = "engines/las-swsh/lasrecomp.exe"
+
+[games.shield]
+name = "Pokémon Shield"
+title_id = "01008DB008C2C000"
+project = "engines/las-swsh"
+pc_save = "engines/las-swsh/save/save_0"
+pc_exe = "engines/las-swsh/lasrecomp.exe"
+
+[games.bdsp]
+name = "Pokémon Brilliant Diamond"
+title_id = "0100000011D90000"
+project = "engines/bdsp"
+pc_save = "%APPDATA%/StrahlenderXnu/save/save_1"
+pc_exe = ""   # definido após rodar o instalador do strahlender-xnu
+
+[games.totk]
+name = "Zelda: Tears of the Kingdom"
+title_id = "0100F2C0115B6000"
+project = "engines/totk"
+pc_save = ""  # perfil do runtime (<profile>/save) - preencha após o primeiro boot
+pc_exe = ""

@@ -1,0 +1,24 @@
+#!/bin/bash
+# Generates the C for all four modules of the dump (standard layout of the spike) to work/recomp/gen4/<module> and
+# measures the generation time. Local only under work/ (gitignored). Usage: gen_all.sh [module ...] [-- further eh_gen arguments]
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+OUT=${OUT:-work/recomp/gen4}
+EXEFS_DIR=${BDSP_EXEFS_DIR:-work/exefs}
+CODEGEN="$(python3 scripts/recomp/native-generator/build.py --require-unicorn)"
+mods=()
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do mods+=("$1"); shift; done
+[ "${1:-}" = "--" ] && shift
+[ ${#mods[@]} -eq 0 ] && mods=(rtld main sdk subsdk0)
+[ ! -f "$EXEFS_DIR/subsdk1" ] || [[ " ${mods[*]} " = *" subsdk1 "* ]] || mods+=(subsdk1)
+source scripts/recomp/module_bases.sh
+mkdir -p "$OUT" work/recomp/spike2
+runner=("$CODEGEN")
+# Detailed resource accounting is opt-in; normal installer logs use stage timings.
+[ "${BDSP_CODEGEN_PROFILE:-0}" != 1 ] || runner=(/usr/bin/time -l "$CODEGEN")
+for m in "${mods[@]}"; do
+  extra=()
+  [ ! -f "$EXEFS_DIR/$m.entries" ] || extra+=(--entry-offsets "$EXEFS_DIR/$m.entries")
+  "${runner[@]}" gen "$m" "$EXEFS_DIR/$m" "$(base_of "$m")" "$OUT/$m" --simd asm ${extra[@]+"${extra[@]}"} "$@" \
+    2>&1 | tee "work/recomp/spike2/gen4_$m.log"
+done

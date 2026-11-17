@@ -1,0 +1,22 @@
+#!/bin/bash
+# Runs locally on Linux: starts work/recomp/bdsp_boot_vk (Vulkan build of runtime), by default without window (--headless: offscreen rendering into
+# images of their own size, no display needed, nothing on the user's desktop) and silent (the runtime has no audio path).
+# Usage: vk_run.sh [NAME=WERT ...] [options of bdsp_boot_vk]   (words of the form NAME=WERT with uppercase names are environment variables)
+#   Default: --headless --timeout 60 (belongs to the runtime; environment BDSP_IMG=work/recomp/img_gfx)
+# Images: work/recomp/shots/frame_NNNNN.png (BDSP_SHOT_DIR changes the folder), shader cache: work/recomp/cache/spirv
+source "$(dirname "$0")/common.sh"
+[ -x "$W/bdsp_boot_vk" ] || die "$W/bdsp_boot_vk is missing (run scripts/recomp/linux/local/vk_build.sh)."
+[ -d work/romfs ] || die "work/romfs is missing (run the extract stage described in docs/BUILD.md first)."
+# UI overlay for any aspect ratio (work/romfs-patch, found by the runtime next to the RomFS); a failure only leaves gaps around the UI on non-16:9 shapes
+python3 scripts/recomp/ui_aspect_patch.py --if-needed --romfs work/romfs --out work/romfs-patch > "${W:-work}/ui-overlay.log" 2>&1 || echo "# UI overlay not generated (see ${W:-work}/ui-overlay.log)"
+export BDSP_IMG=${BDSP_IMG:-$W/img_gfx}
+ARGS=()
+for a in "$@"; do
+  case "$a" in [A-Z]*=*) export "$a";; *) ARGS+=("$a");; esac
+done
+[ ${#ARGS[@]} -gt 0 ] || ARGS=(--headless --timeout 60)
+export SDL_AUDIODRIVER=dummy
+echo "# Start: ${ARGS[*]}"
+"${TIMEV[@]}" "$W/bdsp_boot_vk" "${ARGS[@]}"
+echo "# End, code $?"
+ls -la "${BDSP_SHOT_DIR:-$W/shots}" 2>/dev/null | tail -20

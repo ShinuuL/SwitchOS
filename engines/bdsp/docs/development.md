@@ -1,0 +1,106 @@
+# Development guide
+
+How to work on this repository: the rules that apply to every change, the commands you need, how to test with saves, what lives in
+`work/`, and the known limits. Read [architecture.md](architecture.md) for how the recompilation works and [BUILD.md](BUILD.md)
+for building.
+
+## 1. Rules
+
+| Area | Rule |
+|---|---|
+| Permissions | No `sudo` inside project scripts and no workarounds for missing rights. Anything that needs admin rights is handed to the user as an install list (the guided installers on Linux ask for `sudo` themselves, after confirmation). No whole-disk searches: look only inside the repository or at paths the code or docs name. |
+| Git | Commit only as the project owner; **no co-author or "generated with" trailers** in commits, pull requests, issues, README or docs. `git add <file>` one file at a time, never `-A`. The pre-commit hook runs `scripts/repo_check.py`. Check before every push that only your own commits are ahead of `origin/main`. Push to `main` directly. |
+| Repository contents | Never commit game data, keys, dumps, generated C, saves, screenshots or a team ID. Generated files, builds, traces and screenshots stay under `work/`; third-party clones only under the gitignored `research/`. Summarize third-party work in your own words; never commit machine-translated game code. The team ID lives only in `work/local.env`. |
+| Editing files | Change repository files with the editor tools, not with `sed -i`, heredocs or script-written patches. Stop processes with `kill <PID>`, never `pkill`/`killall`. Run long jobs with `nohup` and a log file. |
+| Language | Documentation is English; German exists only for `README` and `BUILD` (`*.de.md`). **Code comments, docstrings and runtime, log and build messages are English only**; tests assert the English texts. The app UI is English by default with German, Spanish and Portuguese translations in `lproj/*.lproj` (English text = key; regional variants fall back to the language, so only `de`, `es`, `pt` exist); `scripts/install/lang/*` are deliberate translations too. UTF-8; code comments short and only where needed. |
+| Instances and saves | Run one game instance at a time. Never change the real save: tests use a copy through `BDSP_SAVE=<dir>` (fresh directory, never deleted afterwards). No repeat or loop tests on the iPad; the accepted iPad start path stays as it is. |
+| Diagnostics | Debug and measurement features are off by default and switched on with an environment variable (see [rendering.md](rendering.md)). Do not make them part of a release build's normal behavior. |
+| Builds | Do not rebuild the generated game code (`work/recomp/obj4`) from scratch without asking; runtime and NVN changes are rebuilt on their own. Keep at least 15 GB free on the Mac. |
+| Strategy | There is one track: the recompilation. The Unity rebuild is deprecated and lives on the branch `unity`; do not develop on it. Do not run several large efforts in parallel. |
+
+## 2. Commands
+
+macOS tools are BSD variants (no GNU `ls --time-style` and similar); Xcode is selected through `DEVELOPER_DIR`.
+
+| Purpose | Command |
+|---|---|
+| Guided install | `./install.command` (macOS) · `./install-linux.sh` (Linux); `--dry-run` shows the plan |
+| Check and tests | `python3 scripts/repo_check.py` · `python3 -m unittest discover -s scripts/tests` |
+| Build stages | `scripts/build_all.sh --only tools,extract,recomp --target macos …` (stages `tools extract recomp shaders`; `--dry-run`, `--force`) |
+| Test build from the working tree | build the runtime and NVN layer into a separate bundle and keep the shipped app untouched; guest code (`work/recomp/obj4`) is reused |
+| Hot functions at `-O2` | add the function to `scripts/recomp/hot_o2.txt` when `sample <pid> 6` shows it at the top of a guest thread; the next `recomp` build recompiles only that chunk |
+| Run the Mac app | `work/builds/macos-recomp/BDSP.app/Contents/MacOS/BDSP` with environment variables, for example `BDSP_FPS=120`, `BDSP_SAVE=<dir>`, `BDSP_INPUT_SCRIPT=@<file>` (lines `SECONDS:KEY:DURATION`), `BDSP_SHOT_DIR`, `BDSP_SCREENSHOT_FROM`, `BDSP_SCREENSHOT_EVERY` (see [recomp-macapp.md](recomp-macapp.md)) |
+| Names for guest functions | `python3 -I scripts/recomp/il2sym.py` writes `work/recomp/il2sym.tsv`; `BDSP_IL2SYM=work/recomp/il2sym.tsv` logs each game method on first call; `scripts/recomp/symres.py` annotates crash reports. Engine code has no names |
+| Performance and rendering | counters and switches in [rendering.md](rendering.md) (`BDSP_XW_LOG`, `BDSP_PASS_TIMES`, flush causes in the `[metal]` line) |
+| Metal validation | `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1`, group the messages by text; slows the game to 20–30 fps, so never measure with it |
+| Run with a mod | `BDSP_MODS_DIR=<folder> BDSP_MOD=<name>` (or `--mod <name>`); the mod's save lives in `<BDSP_SAVE>/mods/<name>`; see [mods.md](mods.md). Test: `scripts/recomp/runtime/test/run_mods_test.sh` |
+| Save into the runtime | `scripts/recomp/runtime/install_save.sh` (sources `BDSP_SAVE_SRC`, optional `BDSP_SAVE_EXTRA`) |
+| iPad | `scripts/recomp/ios/deploy_ios.sh build\|install\|run [SEC]\|data\|save\|shots\|files` ([recomp-ios.md](recomp-ios.md)); save: `scripts/ios_push_save.sh [--source FILE] [--reimport] [--dry-run]` |
+| Linux | scripts in `scripts/recomp/linux/local/` ([recomp-linux.md](recomp-linux.md)) |
+| QA scenarios | `scripts/recomp/qa/qa_run.sh <scenario>\|--list\|--report <dir>` ([recomp-qa.md](recomp-qa.md)) |
+| Spike measurements | `scripts/recomp_survey.py`, `scripts/recomp/test/run_*.sh` (listed in [architecture.md](architecture.md)) |
+
+Other runtime variables: `BDSP_TIMEOUT`, `BDSP_BT` (backtrace), `BDSP_WAIT` (wait reports), `BDSP_WATCH`, `BDSP_ALIAS_BASE/SIZE`,
+`BDSP_APPMEM`, `BDSP_FPS` (30, 60, 120), `BDSP_PRESENT_AT`, `BDSP_EXEC_WORKER=0` (synchronous renderer path).
+
+Measuring (all off by default): `BDSP_PERF_LOG=1` logs once per second `frames`, `cpu_ms` (CPU time of all threads), GC stop-the-world calls, RSS and
+`cal_us` (a fixed calibration loop: grows when the CPU is throttled); CPU ms per frame is the difference of `cpu_ms` over the difference of `frames`, which
+also works at a frame rate cap. `BDSP_COUNT_FN=<hex>[,<hex>...]` adds the entry counts of up to four guest functions (slows the guest). `BDSP_PROBE_FIXED=1`
+(iOS app) prints device data and tries a fixed 12.5 GiB window at several addresses, then ends. `BDSP_QOS=0` (iOS) switches off the QoS classes of the guest
+threads and the render worker. `BDSP_INPUT_SCRIPT="12:A:0.3,40:LEFT:5.8,..."` scripts the input in seconds since the process start. `BDSP_TEX_INVENTORY=1` logs the live
+textures per NVN format every 600 frames; `BDSP_TEST_NO_BC=1` converts BC textures as on a GPU without BC. Crash statistics: `BDSP_CPU_STRESS=<n>` adds
+n busy host threads (makes rare startup races more likely); `BDSP_XW_SKIP=<mask>` leaves out what the render worker writes into guest memory (1 uniform
+update, 2 buffer copy, 4 counter report, 8 texture read-back, 16 compute dispatch); `BDSP_XW_GPU_LAG=<n>` lets the worker wait for the GPU frame n
+presentations back; `BDSP_MEM_REPORT=<s>` prints dirty and swapped memory per VM tag, the guest window and malloc every s seconds (default 4); `BDSP_RING_MB=<n>` and
+`BDSP_RING_POOL=<n>` size the vertex/uniform ring buffers (default 64 MiB, up to 12 kept for reuse); `BDSP_KEEP_MSL=1` keeps the shader source text after compiling (freed by default, about 330 MiB per session);
+`BDSP_NVN_MEM_BASE=<hex>` with `BDSP_NVN_MEM_MB` sets the Metal buffer over guest memory by hand. `BDSP_MEM_REPORT` also prints the system's compressor activity
+(decompressions, compressions, page-ins per second) and its wired, active, inactive and compressed memory. `BDSP_APPMEM=<hex bytes>` sets the application memory the game is told
+(default 1.6 GiB on devices with less than 5 GiB of RAM in the compact models, otherwise the full figure); `BDSP_RING_MB`/`BDSP_RING_POOL` default to 16 and 4 on those devices.
+`BDSP_GMEM_ARENA=0/1` switches the GPU memory arena (storage buffers copied into a small buffer instead of the buffer over guest memory; default on with less than 5 GiB of RAM,
+see `docs/recomp-ios.md`), `BDSP_ARENA_LOG=<n>` logs the first n mappings and write-backs, and the `[metal]` line counts arena bytes, reuses, written-back bytes and flushes.
+`BDSP_NO_GUEST_BUFFER=1` keeps the GPU away from the Metal buffer over guest memory (experiment: skinned meshes and `gmem` shaders draw wrong, the GPU reports errors). Audio: `BDSP_AUDIO_PROBE=1`
+prints per stream the level, DC offset, sample-to-sample activity, whether the queue runs and the sample rate it really plays (no sample data is stored), and on iOS the session category;
+`BDSP_AUDIO_KICK=<s>` stops the audio queues once after s seconds and lets the next write restart them; `BDSP_FS_SLOW_MS=<ms>` logs RomFS reads that take longer. Comparisons need the
+same save, the same script and a cool device; check the screenshots (`BDSP_SCREENSHOT_EVERY`, `BDSP_SHOT_DIR`) before trusting the numbers.
+
+## 3. Testing with saves
+
+- The game reads input only after about 5 s; with a save it skips the language selection, the title appears after about 20 s,
+  "Continue" leads to the field after about a minute. A scripted input has to press A repeatedly through the title.
+- Test copies: put a save in a directory with `SaveData.bin` and `Backup.bin` (the two files hold different positions, so the start
+  position can alternate) and start with `BDSP_SAVE=<dir>`. The app's own data lives in
+  `~/Library/Application Support/dev.local.xnubdsp` (save, RomFS clone, shader cache).
+- Ryujinx saves: a separate folder is created per profile; if the game shows the language selection despite a save, the wrong
+  profile folder was used. The user ID is in `ExtraData0` (bytes 8 to 23, each 8-byte half byte-reversed). More in [saves.md](saves.md).
+- Keys pressed in the app window still reach the game while a scripted input runs.
+
+## 4. What lives in `work/`
+
+| Needed (do not delete) | `exefs`, `romfs`, `local.env`, `.stages/`, `recomp/gen4` and `recomp/obj4` (guest code), `recomp/img_*`, `recomp/icons`, `recomp/cache` (shader cache copied into every app), `builds/macos-recomp`, `venv`, saves (`save-*`, `ipad-save*`) |
+|---|---|
+| iPad chain (needed for the iPad build) | `recomp/gen4i`, `obj4i`, `img4i`, `ios-rt-a`, `nvn-src-a`, `ios/`, `builds/ios-recomp-derived-a` |
+| Disposable | logs, traces, screenshots, `recomp/tree-*`, `rt-*`, `nvnsrc-*` (test builds), old bundles in `builds/` |
+
+Also outside the repository and never touched by cleanups: `nsp/`, `Ryujinx/`, `Ryujinx_*/` (your dumps and emulator data).
+
+## 5. Known limits and assumptions (do not repeat as facts)
+
+- A rare startup hang or early crash (signal 11 within seconds) exists independently of rendering changes; retrying works. It is a
+  low-priority edge case (decision: no repetition test loops). Measured on 2026-10-23 with short starts: the M2 iPad Pro crashed in about
+  10 to 15 % of the starts (guest code, usually in the garbage collector's mark routine with a small integer as an object pointer, 7 to 17 s
+  after the start, both memory models); 0 of 20 starts with `BDSP_EXEC_WORKER=0` (synchronous renderer) and 0 of 20 on the Mac. That points at the
+  asynchronous render worker racing with the guest, as already suspected in [recomp-ios.md](recomp-ios.md); not proven. Benchmark scripts retry a failed start.
+- Metal validation reports one known start-up message: a 1D texture used as a render attachment (21 times). Nothing else should appear.
+- FPSR/QC floating-point flags are not modeled ([recomp-diff.md](recomp-diff.md)).
+- The 32-bit memory model on the iPad works with about 1.98 GiB of guest memory instead of 3.14 GiB; long sessions and battles are
+  not measured.
+- Vulkan/Linux: the Mac fixes (vertex and index ring buffer, crop inside the window) are not ported everywhere.
+- A free developer team signs the iPad app for 7 days and allows three apps.
+- Legal status of any public distribution is unresolved; built apps contain your game data and are for personal use only.
+
+## 6. Picking work up again
+
+1. `git status`, `git log -3`, `git fetch` and compare with `origin/main`.
+2. Read the [README](README.md), [architecture.md](architecture.md) and this guide.
+3. Run `python3 scripts/repo_check.py` and the unit tests.
+4. Check that no game instance is still running before starting one.

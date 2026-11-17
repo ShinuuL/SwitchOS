@@ -1,0 +1,728 @@
+// Menu, keyboard, controller, file drops, pause and restart of the macOS app (see app.h, docs/recomp-macapp.md).
+// The window loop (ui_run in metal.m, SDL3) calls menu_handle_event for every event and menu_apply_window_requests
+// about every 16 ms on the main thread; both are implemented here (the stubs in nvn/nvn_glue.c are weakly bound).
+// Sound: none. Network: none.
+// UI texts: the English text is the key (NSLocalizedString, development language en); German is in lproj/de.lproj.
+#include "../display_size.h"
+#import <AppKit/AppKit.h>
+#import <GameController/GameController.h>
+#include "../pad_gc.h"
+#include <SDL3/SDL.h>
+#include <spawn.h>
+#include <stdatomic.h>
+#include <unistd.h>
+
+#include "app.h"
+#include "../mods.h"
+#include "../swkbd_ui.h"
+#include "../window_title.h"
+#import "../../app/icon_variants.h"
+
+#import <QuartzCore/QuartzCore.h>
+#import "../../app/shader_status.h"
+
+// In-window AppKit status, not a system notification or a rendered game HUD.
+@interface BDSPShaderBanner : NSVisualEffectView
+@end
+@implementation BDSPShaderBanner
+- (NSView *)hitTest:(NSPoint)point { (void)point; return nil; }
+@end
+
+static void InstallMacShaderStatus(NSView *host) {
+    if (!host) return;
+    BDSPInstallShaderStatus(^(NSString *text) {
+        static BDSPShaderBanner *banner;
+        static NSTextField *label;
+        if (!text) { banner.hidden = YES; return; }
+        if (!banner) {
+            banner = [BDSPShaderBanner new]; banner.translatesAutoresizingMaskIntoConstraints = NO;
+            banner.material = NSVisualEffectMaterialHUDWindow;
+            banner.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+            banner.state = NSVisualEffectStateActive;
+            banner.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+            banner.wantsLayer = YES; banner.layer.cornerRadius = 12; banner.layer.masksToBounds = YES;
+            label = [NSTextField labelWithString:@""]; label.translatesAutoresizingMaskIntoConstraints = NO;
+            label.font = [NSFont systemFontOfSize:14 weight:NSFontWeightMedium];
+            label.textColor = NSColor.whiteColor; label.alignment = NSTextAlignmentCenter;
+            [banner addSubview:label]; [host addSubview:banner];
+            [NSLayoutConstraint activateConstraints:@[
+                [banner.topAnchor constraintEqualToAnchor:host.topAnchor constant:16],
+                [banner.centerXAnchor constraintEqualToAnchor:host.centerXAnchor],
+                [banner.heightAnchor constraintEqualToConstant:40],
+                [banner.widthAnchor constraintGreaterThanOrEqualToConstant:260],
+                [banner.widthAnchor constraintLessThanOrEqualToAnchor:host.widthAnchor constant:-32],
+                [label.leadingAnchor constraintEqualToAnchor:banner.leadingAnchor constant:16],
+                [label.trailingAnchor constraintEqualToAnchor:banner.trailingAnchor constant:-16],
+                [label.centerYAnchor constraintEqualToAnchor:banner.centerYAnchor]]];
+        }
+        label.stringValue = text; banner.hidden = NO;
+    });
+}
+
+// Called only after the native save/snapshot operation reports its result. macOS
+// has no external-backup exporter here, so never claim an external copy exists.
+void bdsp_save_committed(const char *root, const char *snapshot, int failure) {
+    (void)root;
+    @autoreleasepool {
+        NSString *lang = NSLocale.preferredLanguages.firstObject.lowercaseString;
+        BOOL ok = !failure && snapshot;
+        NSString *message = ok ? @"Saved locally" : @"Save or local backup needs attention";
+        if ([lang hasPrefix:@"de"]) message = ok ? @"Lokal gesichert" : @"Save oder lokales Backup prüfen";
+        else if ([lang hasPrefix:@"es"]) message = ok ? @"Guardado localmente" : @"Revisa la partida o la copia local";
+        else if ([lang hasPrefix:@"pt"]) message = ok ? @"Guardado localmente" : @"Verifica o progresso ou a cópia local";
+        else if ([lang hasPrefix:@"ru"] || [lang hasPrefix:@"uk"]) message = ok ? @"Сохранено локально" : @"Проверьте сохранение или локальную копию";
+        bdsp_native_status_message(ok ? "bdsp_notify_save" : "bdsp_notify_warnings", message.UTF8String, 6);
+    }
+}
+
+#define L(s) NSLocalizedString(@s, nil)
+
+static void ApplyDockIcon(void) {
+    NSDictionary *icons = BDSPReadIcons([NSString stringWithUTF8String:g_app.resources]);
+    NSDictionary *variant = BDSPFindIcon(icons, BDSPIconSelection(icons));
+    if ([variant[@"id"] isEqualToString:icons[@"default"]]) {
+        // Preserve the system-rendered layered icon for the embedded default.
+        NSApp.applicationIconImage = nil;
+        return;
+    }
+    NSString *path = [[NSString stringWithUTF8String:g_app.resources] stringByAppendingPathComponent:@"AppIcons"];
+    if (variant) NSApp.applicationIconImage = [[NSImage alloc] initWithContentsOfFile:[path stringByAppendingPathComponent:variant[@"mac_image"] ?: variant[@"image"]]];
+}
+
+extern char **environ;
+void metal_set_display_sync(int on);   // nvn/metal.m
+int metal_display_sync(void);
+void metal_set_drawable_count(int n);
+int metal_drawable_count(void);
+SDL_Window *ui_window(void);
+// ---- Key mapping (Ryujinx default, plus Return/Space = A and Backspace = B)
+typedef struct { SDL_Scancode sc; int kind; int a; int b; } KeyMap;   // kind 0: button a; kind 1: stick axis a with direction b (+1/-1)
+static const KeyMap k_keys[] = {
+    {SDL_SCANCODE_Z, 0, PB_A, 0}, {SDL_SCANCODE_RETURN, 0, PB_A, 0}, {SDL_SCANCODE_SPACE, 0, PB_A, 0},
+    {SDL_SCANCODE_X, 0, PB_B, 0}, {SDL_SCANCODE_BACKSPACE, 0, PB_B, 0},
+    {SDL_SCANCODE_C, 0, PB_X, 0}, {SDL_SCANCODE_V, 0, PB_Y, 0},
+    {SDL_SCANCODE_E, 0, PB_L, 0}, {SDL_SCANCODE_U, 0, PB_R, 0}, {SDL_SCANCODE_Q, 0, PB_ZL, 0}, {SDL_SCANCODE_O, 0, PB_ZR, 0},
+    {SDL_SCANCODE_EQUALS, 0, PB_PLUS, 0}, {SDL_SCANCODE_KP_PLUS, 0, PB_PLUS, 0}, {SDL_SCANCODE_TAB, 0, PB_PLUS, 0},
+    {SDL_SCANCODE_MINUS, 0, PB_MINUS, 0}, {SDL_SCANCODE_KP_MINUS, 0, PB_MINUS, 0},
+    {SDL_SCANCODE_F, 0, PB_LSTICK, 0}, {SDL_SCANCODE_H, 0, PB_RSTICK, 0},
+    {SDL_SCANCODE_LEFT, 0, PB_LEFT, 0}, {SDL_SCANCODE_RIGHT, 0, PB_RIGHT, 0}, {SDL_SCANCODE_UP, 0, PB_UP, 0}, {SDL_SCANCODE_DOWN, 0, PB_DOWN, 0},
+    {SDL_SCANCODE_A, 1, 0, -1}, {SDL_SCANCODE_D, 1, 0, +1}, {SDL_SCANCODE_S, 1, 1, -1}, {SDL_SCANCODE_W, 1, 1, +1},
+    {SDL_SCANCODE_J, 1, 2, -1}, {SDL_SCANCODE_L, 1, 2, +1}, {SDL_SCANCODE_K, 1, 3, -1}, {SDL_SCANCODE_I, 1, 3, +1},
+};
+#define NKEYS (sizeof k_keys / sizeof k_keys[0])
+static bool g_down[SDL_SCANCODE_COUNT];
+
+// The keys of the window as one input source (input.h); the controllers are merged by pad_gc.h
+static void publish(void) {
+    PadState k = {0};
+    int32_t st[4] = {0, 0, 0, 0};
+    for (size_t i = 0; i < NKEYS; i++) {
+        if (!g_down[k_keys[i].sc]) continue;
+        if (k_keys[i].kind == 0) k.buttons |= 1ull << k_keys[i].a;
+        else st[k_keys[i].a] += k_keys[i].b * 32767;
+    }
+    for (int i = 0; i < 4; i++) k.stick[i] = st[i] > 32767 ? 32767 : st[i] < -32767 ? -32767 : st[i];
+    input_source_set(INPUT_SRC_KEYBOARD, &k);
+}
+
+static void release_all(void) {
+    memset(g_down, 0, sizeof g_down);
+    publish();
+}
+
+// ---- Controller (GameController.framework: Xbox, PlayStation, Switch Pro, among others; see pad_gc.h)
+static void pad_poll(void) {
+    g_pad_by_position = !strcmp(g_app.pad_layout, "nintendo");
+    pad_gc_bind_new();   // handlers deliver the changes at once; this per-frame update is the safety net
+    pad_gc_update();
+}
+
+// ---- Messages
+static void front(void) {
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+
+void bdsp_app_alert(const char *title, const char *msg) {
+    fprintf(stderr, "[app] %s: %s\n", title, msg);
+    if (g_app.headless) return;
+    @autoreleasepool {
+        [NSApplication sharedApplication];
+        front();
+        NSAlert *a = [NSAlert new];
+        a.messageText = [NSString stringWithUTF8String:title];
+        a.informativeText = [NSString stringWithUTF8String:msg];
+        [a addButtonWithTitle:@"OK"];
+        [a runModal];
+    }
+}
+
+int bdsp_app_pick_game(const char *const *names, int n, int preselect, int *ask_again) {
+    @autoreleasepool {
+        [NSApplication sharedApplication];
+        front();
+        NSAlert *a = [NSAlert new];
+        a.messageText = @"Choose a game";
+        a.informativeText = @"A mod runs with a save of its own. The save of Brilliant Diamond is not touched while a mod is active.";
+        NSPopUpButton *pop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 320, 26) pullsDown:NO];
+        [pop addItemWithTitle:@"Brilliant Diamond"];
+        for (int i = 0; i < n; i++) [pop addItemWithTitle:@(names[i])];
+        [pop selectItemAtIndex:preselect >= 0 && preselect <= n ? preselect : 0];
+        a.accessoryView = pop;
+        [a addButtonWithTitle:@"Start"];
+        [a addButtonWithTitle:@"Quit"];
+        a.showsSuppressionButton = YES;
+        a.suppressionButton.title = @"Don't ask again (hold Option at launch to choose)";
+        NSModalResponse r = [a runModal];
+        if (ask_again) *ask_again = a.suppressionButton.state != NSControlStateValueOn;
+        return r == NSAlertFirstButtonReturn ? (int)pop.indexOfSelectedItem : -1;
+    }
+}
+
+// answer 1 = first button
+static NSInteger ask(NSString *title, NSString *msg, NSArray<NSString *> *buttons) {
+    front();
+    NSAlert *a = [NSAlert new];
+    a.messageText = title;
+    a.informativeText = msg;
+    for (NSString *b in buttons) [a addButtonWithTitle:b];
+    return [a runModal] - NSAlertFirstButtonReturn + 1;
+}
+
+void bdsp_app_restart(void) {
+    fflush(NULL);
+    // The environment travels through open/exec to the new instance (BDSP_HOME etc. must stay); test hooks must not come along,
+    // otherwise the new instance restarts itself on the same schedule
+    static const char *const test_env[] = {"BDSP_UI_SELFTEST", "BDSP_KEY_SCRIPT", "BDSP_PAUSE_SELFTEST", "BDSP_INPUT_SCRIPT", "BDSP_SCREENSHOT_EVERY",
+                                           "BDSP_SCREENSHOT_FROM", "BDSP_EXIT_AFTER_SHOT", NULL};
+    for (int i = 0; test_env[i]; i++) unsetenv(test_env[i]);
+    if (g_app.bundle[0]) {
+        // The new instance starts after one second, when this one has exited (same save folder, same window)
+        char *args[] = {"/bin/sh", "-c", "sleep 1; exec /usr/bin/open -n \"$0\"", g_app.bundle, NULL};
+        posix_spawnattr_t at;
+        posix_spawnattr_init(&at);
+        posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSID);
+        pid_t pid;
+        posix_spawn(&pid, "/bin/sh", NULL, &at, args, environ);
+        _exit(0);
+    }
+    execv(g_app.exe, g_app.argv);
+    _exit(1);
+}
+
+// ---- Save actions
+static void do_import(NSString *path) {
+    char msg[3000];
+    NSInteger ok = ask(L("Import save?"),
+                       [NSString stringWithFormat:L("%@\n\nThe current save is backed up first (backups/). Then the game restarts."), path],
+                       @[L("Import"), L("Cancel")]);
+    if (ok != 1) return;
+    int r = bdsp_save_import(path.fileSystemRepresentation, msg, sizeof msg);
+    fprintf(stderr, "[app] Import %s: %s\n", r == 0 ? "ok" : "rejected", msg);
+    if (r != 0) { ask(L("Import rejected"), [NSString stringWithUTF8String:msg], @[@"OK"]); return; }
+    ask(L("Save imported"), [NSString stringWithUTF8String:msg], @[L("Restart")]);
+    bdsp_app_restart();
+}
+
+static void open_folder(const char *dir) {
+    NSString *p = [NSString stringWithUTF8String:dir];
+    [[NSFileManager defaultManager] createDirectoryAtPath:p withIntermediateDirectories:YES attributes:nil error:nil];
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:p isDirectory:YES]];
+}
+
+static const char *const k_default_config =
+    "# BDSP: configuration (key = value). Environment variables BDSP_* take precedence. Changes apply after a restart.\n"
+    "# romfs = ~/Library/Application Support/dev.local.xnubdsp/romfs\n"
+    "# save = ~/Library/Application Support/dev.local.xnubdsp/save\n"
+    "# cache = ~/Library/Caches/dev.local.xnubdsp\n"
+    "# logs = ~/Library/Logs/dev.local.xnubdsp\n"
+    "# language = en-US          # language the game asks for (en-US, de, fr, es, it, ja, ko, zh-Hans, zh-Hant)\n"
+    "# window = 1280x720         # window size in points\n"
+    "# fullscreen = 0\n"
+    "# pause_on_focus_loss = 0   # 1: the game pauses when the window loses focus\n"
+    "# pad_layout = nintendo     # nintendo (button position as on the Switch) or xbox (labels)\n"
+    "# backups = 10              # number of backups at start\n"
+    "# aspect = 16:9             # render aspect ratio: 16:9, 16:10, 4:3, 21:9, mbp (MacBook Pro display), ipad11, auto (window shape), or a ratio like 1.6\n"
+    "# render_height = 1080      # render image height in pixels, or auto = the window's native pixel height\n"
+    "# fps = 60                  # frame rate: 30, 60 or 120 (the menu View > Frame Rate takes precedence)\n";
+
+#define KEYS_HELP_EN \
+    "Keyboard (Ryujinx default):\n" \
+    "  Z = A    X = B    C = X    V = Y\n" \
+    "  Return/Space = A    Backspace = B (additionally)\n" \
+    "  E = L    U = R    Q = ZL    O = ZR\n" \
+    "  = or Tab = +    Minus = −    F = press left stick    H = press right stick\n" \
+    "  Arrow keys = D-pad\n" \
+    "  W A S D = left stick    I J K L = right stick\n\n" \
+    "Controller (Xbox, PlayStation, Switch Pro): button position as on the Switch (pad_layout = xbox: by label), " \
+    "Menu = +, View/Options = −.\n\n" \
+    "Window: Cmd+F full screen, Cmd+1 to Cmd+4 window size, Cmd+P pause, Cmd+R restart. No sound."
+
+@interface BdspMenu : NSObject <NSMenuItemValidation>
+@end
+static bool g_user_paused, g_focus_paused;
+static void apply_pause(void) { g_bdsp_paused = g_user_paused || g_focus_paused; }
+
+// Display preferences (aspect ratio, render height): environment > menu choice (defaults) > config.ini, applied to the environment before the game starts.
+static int g_display_env_from_defaults;
+static NSString *display_pref_current(BOOL aspect) {
+    return [NSString stringWithUTF8String:display_pref_or_default(aspect ? "aspect" : "render_height")];
+}
+void bdsp_app_apply_display_defaults(void) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    NSString *a = [d stringForKey:@"bdsp_aspect"], *h = [d stringForKey:@"bdsp_render_h"];
+    if (a.length && !getenv("BDSP_ASPECT")) { setenv("BDSP_ASPECT", a.UTF8String, 0); g_display_env_from_defaults = 1; }
+    if (h.length && !getenv("BDSP_RENDER_H")) setenv("BDSP_RENDER_H", h.UTF8String, 0);
+}
+
+@implementation BdspMenu
+- (void)openSave:(id)s { char d[1300]; bdsp_save_dir(d, sizeof d); open_folder(d); }
+- (void)importSave:(id)s {
+    NSOpenPanel *p = [NSOpenPanel openPanel];
+    p.canChooseFiles = YES;
+    p.canChooseDirectories = YES;
+    p.allowsMultipleSelection = NO;
+    p.showsHiddenFiles = YES;
+    p.message = L("Choose SaveData.bin or the folder containing it (Ryujinx: bis/user/save/<ID>/0; Switch: exported save)");
+    p.prompt = L("Choose");
+    if ([p runModal] == NSModalResponseOK && p.URL) do_import(p.URL.path);
+}
+- (void)resetSave:(id)s {
+    if (ask(L("Reset save?"), L("The current save is moved to the backup folder (backups/), then the game starts again without a save."),
+            @[L("Reset"), L("Cancel")]) != 1) return;
+    char msg[1700];
+    int r = bdsp_save_reset(msg, sizeof msg);
+    fprintf(stderr, "[app] Reset: %s\n", msg);
+    if (r != 0) { ask(L("Reset failed"), [NSString stringWithUTF8String:msg], @[@"OK"]); return; }
+    bdsp_app_restart();
+}
+- (void)restart:(id)s {
+    if (ask(L("Restart"), L("The game is closed and restarted. Unsaved progress is lost."), @[L("Restart"), L("Cancel")]) == 1) bdsp_app_restart();
+}
+- (void)togglePause:(id)s { g_user_paused = !g_user_paused; apply_pause(); if (g_user_paused) release_all(); }
+- (void)toggleFullscreen:(id)s {
+    SDL_Window *w = ui_window();
+    if (w) SDL_SetWindowFullscreen(w, !(SDL_GetWindowFlags(w) & SDL_WINDOW_FULLSCREEN));
+}
+- (void)windowSize:(NSMenuItem *)s {
+    SDL_Window *w = ui_window();
+    if (!w) return;
+    if (SDL_GetWindowFlags(w) & SDL_WINDOW_FULLSCREEN) SDL_SetWindowFullscreen(w, false);
+    SDL_SetWindowSize(w, (int)(s.tag >> 16), (int)(s.tag & 0xFFFF));
+    SDL_SyncWindow(w);
+}
+- (void)setFps:(NSMenuItem *)s {
+    bdsp_set_fps((int)s.tag);
+    [[NSUserDefaults standardUserDefaults] setInteger:s.tag forKey:@"bdsp_fps"];
+}
+// View > Aspect Ratio / Render Resolution: kept in the defaults (env BDSP_ASPECT / BDSP_RENDER_H and config.ini win at the start); the game reads them
+// when it starts, so the choice applies after a restart.
+- (void)setDisplayPref:(NSMenuItem *)it {
+    NSString *key = it.tag == 1 ? @"bdsp_aspect" : @"bdsp_render_h";
+    NSString *value = it.representedObject;
+    if ([value isEqualToString:display_pref_current(it.tag == 1)]) return;
+    [[NSUserDefaults standardUserDefaults] setObject:value forKey:key];
+    if (getenv(it.tag == 1 ? "BDSP_ASPECT" : "BDSP_RENDER_H") && !g_display_env_from_defaults)
+        ask(L("Aspect Ratio"), L("The environment variable BDSP_ASPECT / BDSP_RENDER_H is set and takes precedence."), @[@"OK"]);
+    if (ask(L("Display"), L("The new size applies after a restart. Unsaved progress is lost."), @[L("Restart"), L("Later")]) == 1) bdsp_app_restart();
+}
+- (void)toggleNotice:(NSMenuItem *)sender {
+    NSString *key = sender.representedObject;
+    [NSUserDefaults.standardUserDefaults setBool:!BDSPNoticeEnabled(key) forKey:key];
+}
+- (void)toggleMetalHud:(id)s {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [d setBool:![d boolForKey:@"bdsp_metal_hud"] forKey:@"bdsp_metal_hud"];
+    ask(@"Metal HUD", L("Takes effect after restarting BDSP."), @[@"OK"]);
+}
+// View > Debug > Presentation: buffering (2 or 3 drawables) and VSync, effective at once and kept in the defaults (env BDSP_DRAWABLES / BDSP_DISPLAYSYNC win at the start)
+- (void)setBuffering:(NSMenuItem *)it {
+    metal_set_drawable_count((int)it.tag);
+    [[NSUserDefaults standardUserDefaults] setInteger:it.tag forKey:@"bdsp_drawables"];
+}
+- (void)setVsync:(NSMenuItem *)it {
+    metal_set_display_sync((int)it.tag);
+    [[NSUserDefaults standardUserDefaults] setBool:it.tag == 0 forKey:@"bdsp_vsync_off"];
+}
+- (void)openCache:(id)s { open_folder(g_app.cache); }
+- (void)openLogs:(id)s { open_folder(g_app.logs); }
+- (void)showConfig:(id)s {
+    if (access(g_app.config, R_OK) != 0) { FILE *f = fopen(g_app.config, "w"); if (f) { fputs(k_default_config, f); fclose(f); } }
+    [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:[NSString stringWithUTF8String:g_app.config]]]];
+}
+- (void)showKeys:(id)s { ask(L("Key Bindings"), NSLocalizedStringWithDefaultValue(@"KEYS_HELP", nil, NSBundle.mainBundle, @KEYS_HELP_EN, nil), @[@"OK"]); }
+- (void)selectAppIcon:(NSMenuItem *)sender {
+    [NSUserDefaults.standardUserDefaults setObject:sender.representedObject forKey:@"bdsp_app_icon"];
+    ApplyDockIcon();
+}
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (item.action == @selector(toggleNotice:)) item.state = BDSPNoticeEnabled(item.representedObject) ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(togglePause:)) item.state = g_user_paused ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(setDisplayPref:))
+        item.state = [item.representedObject isEqualToString:display_pref_current(item.tag == 1)] ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(setFps:)) item.state = item.tag == g_bdsp_fps ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(toggleMetalHud:)) item.state = [[NSUserDefaults standardUserDefaults] boolForKey:@"bdsp_metal_hud"] ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(selectAppIcon:)) {
+        NSString *selected = BDSPIconSelection(BDSPReadIcons([NSString stringWithUTF8String:g_app.resources]));
+        item.state = [item.representedObject isEqualToString:selected] ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    if (item.action == @selector(setBuffering:)) item.state = metal_drawable_count() == item.tag ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(setVsync:)) item.state = metal_display_sync() == item.tag ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(toggleFullscreen:)) {
+        SDL_Window *w = ui_window();
+        item.state = w && (SDL_GetWindowFlags(w) & SDL_WINDOW_FULLSCREEN) ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    return YES;
+}
+@end
+
+static BdspMenu *g_target;
+
+static NSMenuItem *item(NSMenu *m, NSString *title, SEL sel, NSString *key, NSEventModifierFlags mods, id target) {
+    NSMenuItem *i = [m addItemWithTitle:title action:sel keyEquivalent:key];
+    i.keyEquivalentModifierMask = mods;
+    i.target = target;
+    return i;
+}
+
+// The choices of one display preference as menu items (tag 1: aspect ratio, 2: render height); the checkmark follows display_pref_current.
+static void add_display_choices(NSMenu *menu, const DisplayChoice *choices, int count, NSInteger tag) {
+    for (int i = 0; i < count; i++) {
+        NSMenuItem *it = item(menu, NSLocalizedString([NSString stringWithUTF8String:choices[i].label], nil), @selector(setDisplayPref:), @"", 0, g_target);
+        it.tag = tag;
+        it.representedObject = [NSString stringWithUTF8String:choices[i].value];
+    }
+}
+
+static void install_menu(void) {
+    g_target = [BdspMenu new];
+    NSMenu *bar = [NSMenu new];
+    NSString *name = @"BDSP";
+    // App menu
+    NSMenuItem *ai = [bar addItemWithTitle:@"" action:nil keyEquivalent:@""];
+    NSMenu *am = [[NSMenu alloc] initWithTitle:name];
+    ai.submenu = am;
+    item(am, L("About BDSP"), @selector(orderFrontStandardAboutPanel:), @"", 0, NSApp);
+    NSMenuItem *noticeItem = [am addItemWithTitle:L("Notifications") action:nil keyEquivalent:@""];
+    NSMenu *notices = [[NSMenu alloc] initWithTitle:noticeItem.title]; noticeItem.submenu = notices;
+    NSArray *noticeTitles = @[L("Shader preparation"), L("Save confirmations"), L("Save and backup warnings")];
+    NSArray *noticeKeys = @[@"bdsp_notify_shaders", @"bdsp_notify_save", @"bdsp_notify_warnings"];
+    for (NSUInteger n = 0; n < noticeTitles.count; n++) {
+        NSMenuItem *toggle = item(notices, noticeTitles[n], @selector(toggleNotice:), @"", 0, g_target);
+        toggle.representedObject = noticeKeys[n];
+    }
+
+    NSMenuItem *iconItem = [am addItemWithTitle:L("App icon") action:nil keyEquivalent:@""];
+    NSMenu *iconMenu = [[NSMenu alloc] initWithTitle:iconItem.title];
+    iconItem.submenu = iconMenu;
+    NSMenuItem *defaultIcon = item(iconMenu, L("Default (English)"), @selector(selectAppIcon:), @"", 0, g_target);
+    defaultIcon.representedObject = @"default";
+    NSDictionary *icons = BDSPReadIcons([NSString stringWithUTF8String:g_app.resources]);
+    NSDictionary *recommended = BDSPRecommendedIcon(icons, NSLocale.preferredLanguages);
+    NSDictionary *standardIcon = BDSPFindIcon(icons, @"default");
+    if (standardIcon && ![icons[@"default"] hasPrefix:@"en-"])
+        defaultIcon.title = [NSString stringWithFormat:@"%@ (%@)", L("Default"), standardIcon[@"label"]];
+    for (NSDictionary *variant in icons[@"variants"]) {
+        NSString *label = variant[@"label"];
+        if ([variant[@"id"] isEqual:recommended[@"id"]]) label = [label stringByAppendingString:L(" (recommended)")];
+        NSMenuItem *entry = item(iconMenu, label, @selector(selectAppIcon:), @"", 0, g_target);
+        entry.representedObject = variant[@"id"];
+        entry.image = [[NSImage alloc] initWithContentsOfFile:[[[NSString stringWithUTF8String:g_app.resources] stringByAppendingPathComponent:@"AppIcons"] stringByAppendingPathComponent:variant[@"mac_image"] ?: variant[@"image"]]];
+        entry.image.size = NSMakeSize(24, 24);
+    }
+    ApplyDockIcon();
+    [am addItem:[NSMenuItem separatorItem]];
+    item(am, L("Hide BDSP"), @selector(hide:), @"h", NSEventModifierFlagCommand, NSApp);
+    item(am, L("Hide Others"), @selector(hideOtherApplications:), @"h", NSEventModifierFlagCommand | NSEventModifierFlagOption, NSApp);
+    item(am, L("Show All"), @selector(unhideAllApplications:), @"", 0, NSApp);
+    [am addItem:[NSMenuItem separatorItem]];
+    item(am, L("Quit BDSP"), @selector(terminate:), @"q", NSEventModifierFlagCommand, NSApp);
+    // Game
+    NSMenuItem *gi = [bar addItemWithTitle:@"" action:nil keyEquivalent:@""];
+    NSMenu *gm = [[NSMenu alloc] initWithTitle:L("Game")];
+    gi.submenu = gm;
+    item(gm, L("Open Save Folder"), @selector(openSave:), @"o", NSEventModifierFlagCommand, g_target);
+    item(gm, L("Import Save …"), @selector(importSave:), @"i", NSEventModifierFlagCommand, g_target);
+    [gm addItem:[NSMenuItem separatorItem]];
+    item(gm, L("Pause"), @selector(togglePause:), @"p", NSEventModifierFlagCommand, g_target);
+    item(gm, L("Restart"), @selector(restart:), @"r", NSEventModifierFlagCommand, g_target);
+    item(gm, L("Reset Game …"), @selector(resetSave:), @"r", NSEventModifierFlagCommand | NSEventModifierFlagShift, g_target);
+    // View
+    NSMenuItem *vi = [bar addItemWithTitle:@"" action:nil keyEquivalent:@""];
+    NSMenu *vm = [[NSMenu alloc] initWithTitle:L("View")];
+    vi.submenu = vm;
+    item(vm, L("Full Screen"), @selector(toggleFullscreen:), @"f", NSEventModifierFlagCommand, g_target);
+    NSMenuItem *fi = [vm addItemWithTitle:L("Frame Rate") action:nil keyEquivalent:@""];
+    NSMenu *fm = [[NSMenu alloc] initWithTitle:L("Frame Rate")];
+    fi.submenu = fm;
+    for (NSNumber *f in @[@30, @60, @120]) {
+        NSMenuItem *it = item(fm, [NSString stringWithFormat:@"%@ fps", f], @selector(setFps:), @"", 0, g_target);
+        it.tag = f.integerValue;
+    }
+    NSInteger savedFps = [[NSUserDefaults standardUserDefaults] integerForKey:@"bdsp_fps"];
+    if (savedFps && !getenv("BDSP_FPS")) bdsp_set_fps((int)savedFps);
+    NSMenuItem *aspi = [vm addItemWithTitle:L("Aspect Ratio") action:nil keyEquivalent:@""];
+    NSMenu *aspm = [[NSMenu alloc] initWithTitle:L("Aspect Ratio")];
+    aspi.submenu = aspm;
+    int nchoices;
+    const DisplayChoice *aspects = display_aspect_choices(&nchoices);
+    add_display_choices(aspm, aspects, nchoices, 1);
+    NSMenuItem *ri = [vm addItemWithTitle:L("Render Resolution") action:nil keyEquivalent:@""];
+    NSMenu *rm = [[NSMenu alloc] initWithTitle:L("Render Resolution")];
+    ri.submenu = rm;
+    const DisplayChoice *heights = display_height_choices(&nchoices);
+    add_display_choices(rm, heights, nchoices, 2);
+    [vm addItem:[NSMenuItem separatorItem]];
+    static const int sizes[4][2] = {{960, 540}, {1280, 720}, {1920, 1080}, {2560, 1440}};
+    for (int i = 0; i < 4; i++) {
+        NSMenuItem *it = item(vm, [NSString stringWithFormat:L("Window Size %d × %d"), sizes[i][0], sizes[i][1]], @selector(windowSize:),
+                              [NSString stringWithFormat:@"%d", i + 1], NSEventModifierFlagCommand, g_target);
+        it.tag = (NSInteger)sizes[i][0] << 16 | sizes[i][1];
+    }
+    [vm addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *di = [vm addItemWithTitle:L("Debug") action:nil keyEquivalent:@""];
+    NSMenu *dm = [[NSMenu alloc] initWithTitle:L("Debug")];
+    di.submenu = dm;
+    item(dm, L("Show Metal HUD"), @selector(toggleMetalHud:), @"", 0, g_target);
+    NSMenuItem *pi = [dm addItemWithTitle:L("Presentation") action:nil keyEquivalent:@""];
+    NSMenu *pm = [[NSMenu alloc] initWithTitle:L("Presentation")];
+    pi.submenu = pm;
+    item(pm, L("Double Buffering (less delay)"), @selector(setBuffering:), @"", 0, g_target).tag = 2;
+    item(pm, L("Triple Buffering"), @selector(setBuffering:), @"", 0, g_target).tag = 3;
+    [pm addItem:[NSMenuItem separatorItem]];
+    item(pm, L("VSync On"), @selector(setVsync:), @"", 0, g_target).tag = 1;
+    item(pm, L("VSync Off (less delay, may tear)"), @selector(setVsync:), @"", 0, g_target).tag = 0;
+    // Window
+    NSMenuItem *wi = [bar addItemWithTitle:@"" action:nil keyEquivalent:@""];
+    NSMenu *wm = [[NSMenu alloc] initWithTitle:L("Window")];
+    wi.submenu = wm;
+    item(wm, L("Minimize"), @selector(performMiniaturize:), @"m", NSEventModifierFlagCommand, nil);
+    [NSApp setWindowsMenu:wm];
+    // Help
+    NSMenuItem *hi = [bar addItemWithTitle:@"" action:nil keyEquivalent:@""];
+    NSMenu *hm = [[NSMenu alloc] initWithTitle:L("Help")];
+    hi.submenu = hm;
+    item(hm, L("Key Bindings …"), @selector(showKeys:), @"", 0, g_target);
+    item(hm, L("Show Configuration File"), @selector(showConfig:), @"", 0, g_target);
+    item(hm, L("Open Cache Folder (Shaders, Images)"), @selector(openCache:), @"", 0, g_target);
+    item(hm, L("Open Log Folder"), @selector(openLogs:), @"", 0, g_target);
+    [NSApp setMainMenu:bar];
+    [NSApp setHelpMenu:hm];
+    if (getenv("BDSP_MENU_DUMP")) {   // check of the menu structure without looking at the screen
+        for (NSMenuItem *top in bar.itemArray) {
+            fprintf(stderr, "[menu] %s\n", top.submenu.title.UTF8String);
+            for (NSMenuItem *it in top.submenu.itemArray)
+                if (!it.separatorItem) fprintf(stderr, "[menu]   %s [%s%s%s%s]\n", it.title.UTF8String,
+                                               (it.keyEquivalentModifierMask & NSEventModifierFlagCommand) ? "Cmd+" : "",
+                                               (it.keyEquivalentModifierMask & NSEventModifierFlagShift) ? "Shift+" : "",
+                                               (it.keyEquivalentModifierMask & NSEventModifierFlagOption) ? "Option+" : "", it.keyEquivalent.UTF8String);
+        }
+    }
+}
+
+// ---- Hooks of the window loop (metal.m ui_run)
+// Events for the on-screen keyboard (swkbd_ui.c): typed text, editing keys, mouse and touch. Returns true when consumed.
+static bool swkbd_event(const SDL_Event *e) {
+    switch (e->type) {
+    case SDL_EVENT_TEXT_INPUT: swkbd_ui_text(e->text.text); return true;
+    case SDL_EVENT_KEY_DOWN:
+        if (e->key.mod & SDL_KMOD_GUI) return false;
+        switch (e->key.scancode) {
+        case SDL_SCANCODE_BACKSPACE: swkbd_ui_key(SWKBD_KEY_BACKSPACE); break;
+        case SDL_SCANCODE_DELETE: swkbd_ui_key(SWKBD_KEY_DELETE); break;
+        case SDL_SCANCODE_LEFT: swkbd_ui_key(SWKBD_KEY_LEFT); break;
+        case SDL_SCANCODE_RIGHT: swkbd_ui_key(SWKBD_KEY_RIGHT); break;
+        case SDL_SCANCODE_HOME: swkbd_ui_key(SWKBD_KEY_HOME); break;
+        case SDL_SCANCODE_END: swkbd_ui_key(SWKBD_KEY_END); break;
+        case SDL_SCANCODE_RETURN: case SDL_SCANCODE_KP_ENTER: swkbd_ui_key(SWKBD_KEY_ENTER); break;
+        case SDL_SCANCODE_ESCAPE: swkbd_ui_key(SWKBD_KEY_ESCAPE); break;
+        default: break;
+        }
+        return true;
+    case SDL_EVENT_KEY_UP: return !(e->key.mod & SDL_KMOD_GUI);
+    case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+        SDL_Window *w = ui_window();
+        int ww = 0, wh = 0;
+        if (w) SDL_GetWindowSize(w, &ww, &wh);
+        if (e->button.button == SDL_BUTTON_LEFT && ww > 0 && wh > 0) swkbd_ui_touch(1, e->button.x / ww, e->button.y / wh);
+        return true;
+    }
+    case SDL_EVENT_MOUSE_BUTTON_UP: {
+        SDL_Window *w = ui_window();
+        int ww = 0, wh = 0;
+        if (w) SDL_GetWindowSize(w, &ww, &wh);
+        if (e->button.button == SDL_BUTTON_LEFT && ww > 0 && wh > 0) swkbd_ui_touch(0, e->button.x / ww, e->button.y / wh);
+        return true;
+    }
+    case SDL_EVENT_FINGER_DOWN: swkbd_ui_touch(1, e->tfinger.x, e->tfinger.y); return true;
+    case SDL_EVENT_FINGER_UP: swkbd_ui_touch(0, e->tfinger.x, e->tfinger.y); return true;
+    case SDL_EVENT_FINGER_CANCELED: swkbd_ui_touch(-1, e->tfinger.x, e->tfinger.y); return true;
+    default: return false;
+    }
+}
+
+bool menu_handle_event(const SDL_Event *e) {
+    if (swkbd_ui_active() && swkbd_event(e)) return true;
+    switch (e->type) {
+    case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:
+        if (e->key.mod & SDL_KMOD_GUI) return true;   // menu shortcuts (Cmd+…) belong to the menu
+        if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_ESCAPE) {
+            SDL_Window *w = ui_window();
+            if (w && (SDL_GetWindowFlags(w) & SDL_WINDOW_FULLSCREEN)) SDL_SetWindowFullscreen(w, false);
+            return true;
+        }
+        if (e->key.scancode < SDL_SCANCODE_COUNT) { g_down[e->key.scancode] = e->type == SDL_EVENT_KEY_DOWN; publish(); }
+        return true;
+    case SDL_EVENT_DROP_FILE:
+        if (e->drop.data) do_import([NSString stringWithUTF8String:e->drop.data]);
+        return true;
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+        release_all();
+        if (g_app.pause_on_focus_loss) { g_focus_paused = true; apply_pause(); }
+        return false;
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+        if (g_focus_paused) { g_focus_paused = false; apply_pause(); }
+        return false;
+    default: return false;
+    }
+}
+
+// ---- Key script for tests (BDSP_KEY_SCRIPT="second:KEY:duration,…" or "@file", counted from process start): feeds real SDL key events
+// into the window loop, so through the same mapping as the keyboard (e.g. "62:Z:0.4,70:Up:2"; key names as in SDL_GetScancodeFromName)
+typedef struct { double at, len; SDL_Scancode sc; bool down; } KeyStep;
+static KeyStep g_ks[4096];
+static int g_nks = -1;
+
+static void key_script_load(void) {
+    g_nks = 0;
+    const char *spec = getenv("BDSP_KEY_SCRIPT");
+    if (!spec) return;
+    static char buf[1 << 17];
+    if (spec[0] == '@') {
+        FILE *f = fopen(spec + 1, "rb");
+        size_t n = f ? fread(buf, 1, sizeof buf - 1, f) : 0;
+        if (f) fclose(f);
+        buf[n] = 0;
+        for (size_t i = 0; i < n; i++) if (buf[i] == '\n') buf[i] = ',';
+    } else snprintf(buf, sizeof buf, "%s", spec);
+    char *save = NULL;
+    for (char *tok = strtok_r(buf, ",", &save); tok && g_nks < 4096; tok = strtok_r(NULL, ",", &save)) {
+        double at = 0, len = 0.3;
+        char name[32] = "";
+        if (sscanf(tok, "%lf:%31[^:]:%lf", &at, name, &len) < 2) continue;
+        SDL_Scancode sc = SDL_GetScancodeFromName(name);
+        if (sc == SDL_SCANCODE_UNKNOWN) { fprintf(stderr, "[app] Key script: unknown key %s\n", name); continue; }
+        g_ks[g_nks++] = (KeyStep){at, len, sc, false};
+    }
+    fprintf(stderr, "[app] Key script with %d steps\n", g_nks);
+}
+
+static void key_script_tick(void) {
+    if (g_nks < 0) key_script_load();
+    static double t0;
+    if (!t0) t0 = SDL_GetTicks() / 1000.0;
+    double t = SDL_GetTicks() / 1000.0 - t0;
+    for (int i = 0; i < g_nks; i++) {
+        bool want = t >= g_ks[i].at && t < g_ks[i].at + g_ks[i].len;
+        if (want == g_ks[i].down) continue;
+        g_ks[i].down = want;
+        SDL_Event e;
+        memset(&e, 0, sizeof e);
+        e.type = want ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+        e.key.scancode = g_ks[i].sc;
+        e.key.down = want;
+        SDL_PushEvent(&e);
+    }
+}
+
+// ---- Self-test of the menu actions (BDSP_UI_SELFTEST="second:action,…", actions: fs, w960, w1280, w1920, w2560, pause, restart): calls the same
+// methods as the menu items (without confirmation), because key shortcuts cannot be sent from outside (accessibility access not allowed)
+static void ui_selftest_tick(void) {
+    static char buf[512];
+    static struct { double at; char act[16]; bool done; } st[32];
+    static int n = -1;
+    static double t0;
+    if (n < 0) {
+        n = 0;
+        const char *s = getenv("BDSP_UI_SELFTEST");
+        if (s) {
+            snprintf(buf, sizeof buf, "%s", s);
+            char *save = NULL;
+            for (char *tok = strtok_r(buf, ",", &save); tok && n < 32; tok = strtok_r(NULL, ",", &save))
+                if (sscanf(tok, "%lf:%15s", &st[n].at, st[n].act) == 2) n++;
+        }
+        t0 = SDL_GetTicks() / 1000.0;
+    }
+    double t = SDL_GetTicks() / 1000.0 - t0;
+    for (int i = 0; i < n; i++) {
+        if (st[i].done || t < st[i].at || !g_target) continue;
+        st[i].done = true;
+        fprintf(stderr, "[app] Selbsttest %s bei %.1f s\n", st[i].act, t);
+        if (!strcmp(st[i].act, "fs")) [g_target toggleFullscreen:nil];
+        else if (!strcmp(st[i].act, "pause")) [g_target togglePause:nil];
+        else if (!strncmp(st[i].act, "buf", 3) || !strncmp(st[i].act, "vsync", 5)) {   // buf2, buf3, vsync0, vsync1
+            NSMenuItem *it = [NSMenuItem new];
+            if (st[i].act[0] == 'b') { it.tag = atoi(st[i].act + 3); [g_target setBuffering:it]; }
+            else { it.tag = atoi(st[i].act + 5); [g_target setVsync:it]; }
+        }
+        else if (!strcmp(st[i].act, "restart")) bdsp_app_restart();
+        else if (st[i].act[0] == 'w') {
+            NSMenuItem *it = [NSMenuItem new];
+            int w = atoi(st[i].act + 1);
+            it.tag = (NSInteger)w << 16 | (w * 9 / 16);
+            [g_target windowSize:it];
+        }
+    }
+}
+
+void menu_apply_window_requests(void *window) {
+    static bool started;
+    ui_selftest_tick();
+    if (!started) {
+        started = true;
+        @autoreleasepool {
+            install_menu();
+            SDL_Window *w = window;
+            NSWindow *native = (__bridge NSWindow *)SDL_GetPointerProperty(SDL_GetWindowProperties(w),
+                SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
+            InstallMacShaderStatus(native.contentView);
+            char title[600];  // the game's own name in the system language, then the mod and BDSP_WINDOW_TAG (window_title.h)
+            bdsp_window_title(title, sizeof title, g_app.resources, mods_active() ? mods_active()->name : NULL);
+            SDL_SetWindowTitle(w, title);
+            SDL_SetWindowMinimumSize(w, 640, 360);
+            {   // View > Debug > Presentation: the saved choice (the environment variables take precedence)
+                NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+                if (!getenv("BDSP_DISPLAYSYNC") && [d boolForKey:@"bdsp_vsync_off"]) metal_set_display_sync(0);
+                if (!getenv("BDSP_DRAWABLES") && [d integerForKey:@"bdsp_drawables"] == 3) metal_set_drawable_count(3);
+            }
+            if (g_app.fullscreen && !g_app.headless) SDL_SetWindowFullscreen(w, true);
+            if (!g_app.headless) {
+                // The window only now appears in the foreground (SDL shows it without activation)
+                front();
+            }
+        }
+    }
+    @autoreleasepool { pad_poll(); }
+    input_tick();
+    {   // on-screen keyboard: input moves over to it while it is open (and back, with all held keys released)
+        static bool kb_was;
+        bool kb = swkbd_ui_active();
+        if (kb != kb_was) {
+            kb_was = kb;
+            memset(g_down, 0, sizeof g_down);
+            if (kb) SDL_StartTextInput(window); else SDL_StopTextInput(window);
+            publish();
+        }
+    }
+    key_script_tick();
+    // Self-test of the pause (BDSP_PAUSE_SELFTEST="<from second>:<duration>"): stops the vsync event and releases it again
+    static double t0, p0 = -1, plen;
+    if (!t0) {
+        t0 = SDL_GetTicks() / 1000.0;
+        const char *s = getenv("BDSP_PAUSE_SELFTEST");
+        if (s) sscanf(s, "%lf:%lf", &p0, &plen);
+    }
+    double t = SDL_GetTicks() / 1000.0 - t0;
+    if (p0 >= 0 && t >= p0 && t < p0 + plen && !g_user_paused) { g_user_paused = true; apply_pause(); fprintf(stderr, "[app] Pause (Selbsttest) bei %.1f s\n", t); }
+    if (p0 >= 0 && t >= p0 + plen && g_user_paused) { g_user_paused = false; apply_pause(); fprintf(stderr, "[app] Pause beendet bei %.1f s\n", t); p0 = -1; }
+}

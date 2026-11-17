@@ -1,0 +1,2205 @@
+use super::{FolderSetting, InstallTarget, Installer, Message, Page, compact_name, index};
+use crate::{
+    drop_target,
+    i18n::{Label as L, Language},
+    icons::{self, Icon},
+    platform::Platform,
+    preferences::Appearance,
+    sources::{Slot, Source},
+    style,
+};
+use iced::widget::{
+    button, column, container, mouse_area, pick_list, progress_bar, row, scrollable, space, stack,
+    text, text_input, toggler, tooltip,
+};
+use iced::{Center, Element, Fill, Size, Task, window};
+use std::path::PathBuf;
+
+// Shared width accommodates the longest German/English picker label plus padding.
+const FILE_ACTION_WIDTH: f32 = 112.0;
+
+impl Installer {
+    pub(super) fn preferred_size(&self) -> Size {
+        Size::new(
+            crate::window_layout::WIDTH,
+            if self.details {
+                crate::window_layout::LOG_HEIGHT
+            } else {
+                crate::window_layout::HEIGHT
+            },
+        )
+    }
+
+    pub(super) fn fit_window(&self) -> Task<Message> {
+        let size = self.preferred_size();
+        #[cfg(target_os = "macos")]
+        return window::latest()
+            .and_then(move |id| {
+                window::run(id, move |window| crate::window_layout::fit(window, size))
+            })
+            .map(|_| Message::LayoutApplied);
+        #[cfg(not(target_os = "macos"))]
+        window::latest().and_then(move |id| crate::window_layout::resize(id, size))
+    }
+
+    pub fn view(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        let mut header = row![
+            text("Strahlender Installer").size(15).color(c.muted),
+            space().width(Fill),
+            self.icon_action(
+                if self.appearance == Appearance::Dark {
+                    Icon::Sun
+                } else {
+                    Icon::Moon
+                },
+                if self.appearance == Appearance::Dark {
+                    L::UseLight
+                } else {
+                    L::UseDark
+                },
+                Message::ToggleTheme,
+            ),
+            self.icon_action(Icon::Settings, L::Settings, Message::OpenSettings(true)),
+            self.icon_action(Icon::Github, L::OpenRepository, Message::OpenRepository),
+        ]
+        .align_y(Center)
+        .spacing(8);
+        if let Some(release) = &self.available_update {
+            let mut action = button(
+                text(if self.updating {
+                    self.language.t(L::UpdateDownloading).to_owned()
+                } else {
+                    format!("{} {}", self.language.t(L::UpdateShort), release.version)
+                })
+                .size(11),
+            )
+            .padding([6, 9])
+            .style(move |_, status| style::action(c, false, status));
+            if !self.updating && self.backend_status != super::BackendStatus::Running {
+                action = action.on_press(Message::ShowUpdateDetails);
+            }
+            header = header.push(action);
+        }
+        let body = if self.settings_open {
+            self.settings_view()
+        } else if self.ios_signing_open {
+            self.ios_signing_view()
+        } else if self.ios_devices_open {
+            self.ios_devices_view()
+        } else {
+            match self.page {
+                Page::Target => self.target_view(),
+                Page::Keys | Page::Game | Page::Update => self.input_view(),
+                Page::Firmware => self.firmware_view(),
+                Page::ModsFolder => self.mods_folder_view(),
+                Page::Mods => self.mods_view(),
+                Page::Review => self.review_view(),
+                Page::Setup => self.setup_view(),
+                Page::Progress => self.progress_view(),
+                Page::Finished => self.finished_view(),
+            }
+        };
+        let mut top = column![header].spacing(6);
+        if self.demo {
+            top = top.push(
+                text(if self.simulated_platform {
+                    format!("{} · {}", self.host.label(), self.language.t(L::DemoMode))
+                } else {
+                    self.language.t(L::DemoMode).to_owned()
+                })
+                .size(11)
+                .color(c.muted),
+            );
+        }
+        let layout = column![
+            container(top).padding(iced::Padding {
+                top: 16.0,
+                right: 24.0,
+                bottom: 12.0,
+                left: 24.0
+            }),
+            scrollable(
+                container(body)
+                    .padding(iced::Padding {
+                        top: 4.0,
+                        right: 24.0,
+                        bottom: 8.0,
+                        left: 24.0
+                    })
+                    .width(Fill)
+            )
+            .id("main-content")
+            .height(Fill),
+            container(self.status_footer())
+                .padding([12, 24])
+                .width(Fill),
+        ];
+        let base: Element<'_, Message> = container(layout)
+            .width(Fill)
+            .height(crate::window_layout::HEIGHT)
+            .style(style::page(c))
+            .into();
+        let base = if self.details {
+            let log: Element<'_, Message> = if self.log.is_empty() {
+                text(self.language.t(L::LogEmpty))
+                    .size(11)
+                    .font(iced::Font::MONOSPACE)
+                    .into()
+            } else {
+                column(self.log.iter().enumerate().map(|(index, line)| {
+                    let copied = self.copied_log_line.is_some_and(|(line, _)| line == index);
+                    row![
+                        text(line).size(11).font(iced::Font::MONOSPACE).width(Fill),
+                        button(icons::view(
+                            if copied { Icon::Check } else { Icon::Copy },
+                            12.0,
+                            if copied { c.text } else { c.muted },
+                        ))
+                        .padding(3)
+                        .on_press(Message::CopyLogLine(index))
+                        .style(move |_, status| {
+                            iced::widget::button::Style {
+                                background: if matches!(
+                                    status,
+                                    iced::widget::button::Status::Hovered
+                                        | iced::widget::button::Status::Pressed
+                                ) {
+                                    Some(c.line.into())
+                                } else {
+                                    None
+                                },
+                                border: iced::Border {
+                                    radius: 3.0.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }
+                        }),
+                    ]
+                    .spacing(8)
+                    .padding([2, 4])
+                    .width(Fill)
+                    .into()
+                }))
+                .width(Fill)
+                .into()
+            };
+            let log_height = crate::window_layout::LOG_HEIGHT - crate::window_layout::HEIGHT - 8.0;
+            container(
+                column![
+                    base,
+                    container(
+                        scrollable(log)
+                            .id("session-log")
+                            .spacing(8)
+                            .anchor_bottom()
+                            .height(Fill),
+                    )
+                    .padding(12)
+                    .width(Fill)
+                    .height(log_height)
+                    .style(move |_| style::surface(c, false)),
+                ]
+                .spacing(8),
+            )
+            .width(Fill)
+            .height(Fill)
+            .style(style::page(c))
+            .into()
+        } else {
+            base
+        };
+        if let Some(notice) = &self.notice {
+            let backdrop = mouse_area(
+                container(space().width(Fill).height(Fill))
+                    .width(Fill)
+                    .height(Fill)
+                    .style(move |_| container::Style {
+                        background: Some(iced::Background::Color(iced::Color::from_rgba8(
+                            0, 0, 0, 0.27,
+                        ))),
+                        ..Default::default()
+                    }),
+            )
+            .on_press(Message::DismissNotice);
+            let mut dialog = column![
+                text(self.language.t(if self.update_confirmation {
+                    L::UpdateAvailable
+                } else if self.info_notice {
+                    L::SaveExportedTitle
+                } else {
+                    L::ErrorTitle
+                }))
+                .size(18),
+                text(notice)
+                    .size(13)
+                    .color(if self.update_confirmation || self.info_notice {
+                        c.text
+                    } else {
+                        c.error
+                    }),
+            ]
+            .spacing(12);
+            if self.page == super::Page::Progress && !self.info_notice {
+                dialog = dialog.push(
+                    text(self.language.t(L::ErrorDetailsHint))
+                        .size(12)
+                        .color(c.muted),
+                );
+            }
+            let mut actions = row![].spacing(8).align_y(Center);
+            if self.update_confirmation {
+                actions = actions.push(
+                    button(text(self.language.t(L::UpdateInstaller)).size(12))
+                        .padding([8, 12])
+                        .on_press(Message::UpdateInstaller)
+                        .style(move |_, status| style::action(c, true, status)),
+                );
+            }
+            if self.page == super::Page::Progress && !self.info_notice {
+                actions = actions.push(
+                    button(text(self.language.t(L::ShowErrorDetails)).size(12))
+                        .padding([8, 12])
+                        .on_press(Message::ShowNoticeDetails)
+                        .style(move |_, status| style::action(c, false, status)),
+                );
+            }
+            actions = actions.push(
+                button(
+                    text(self.language.t(if self.update_confirmation {
+                        L::UpdateLater
+                    } else {
+                        L::DismissError
+                    }))
+                    .size(12),
+                )
+                .padding([8, 12])
+                .on_press(Message::DismissNotice)
+                .style(move |_, status| style::action(c, true, status)),
+            );
+            let card = container(column![dialog, actions].spacing(18))
+                .width(360)
+                .padding(20)
+                .style(move |_| {
+                    let mut surface = style::surface(c, false);
+                    surface.border.radius = 20.0.into();
+                    surface
+                });
+            let centered = container(card)
+                .width(Fill)
+                .height(Fill)
+                .center_x(Fill)
+                .center_y(Fill);
+            stack![base, backdrop, centered]
+                .width(Fill)
+                .height(Fill)
+                .into()
+        } else {
+            base
+        }
+    }
+
+    fn title<'a>(&self, title: &'a str, subtitle: &'a str) -> Element<'a, Message> {
+        let c = style::colors(self.appearance);
+        column![text(title).size(23), text(subtitle).size(13).color(c.muted)]
+            .spacing(8)
+            .into()
+    }
+
+    fn icon_action(&self, icon: Icon, label: L, message: Message) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        tooltip(
+            button(icons::view(icon, 18.0, c.text))
+                .padding(8)
+                .on_press(message)
+                .style(move |_, status| style::action(c, false, status)),
+            text(self.language.t(label)).size(12),
+            tooltip::Position::Bottom,
+        )
+        .into()
+    }
+
+    fn target_view(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        let mut choices = row![].spacing(10);
+        for target in self
+            .targets()
+            .into_iter()
+            .filter(|target| *target != InstallTarget::Android)
+        {
+            let selected = self.target == target;
+            let color = if selected { c.accent_text } else { c.text };
+            let mut symbols = row![].spacing(4).align_y(Center);
+            if target == InstallTarget::Ios {
+                symbols = symbols
+                    .push(icons::view_for_host(Icon::Tablet, 26.0, color, self.host))
+                    .push(icons::view_for_host(Icon::Phone, 22.0, color, self.host));
+            } else {
+                let icon = if target == InstallTarget::Mac {
+                    Icon::Laptop
+                } else {
+                    Icon::Desktop
+                };
+                symbols = symbols.push(icons::view_for_host(icon, 26.0, color, self.host));
+            }
+            choices = choices.push(
+                button(
+                    container(
+                        column![
+                            container(symbols).height(26).center_y(26).center_x(Fill),
+                            text(target.label()).size(14),
+                        ]
+                        .spacing(6)
+                        .align_x(Center),
+                    )
+                    .width(Fill)
+                    .center_x(Fill),
+                )
+                .padding([10, 8])
+                .width(Fill)
+                .on_press(Message::SelectTarget(target))
+                .style(move |_, status| style::action(c, selected, status)),
+            );
+        }
+        let android = container(
+            row![
+                icons::view(Icon::GenericPhone, 18.0, c.muted),
+                text("Android").size(13).color(c.muted),
+                space().width(Fill),
+                text(self.language.t(L::ComingLater))
+                    .size(11)
+                    .color(c.muted),
+            ]
+            .spacing(8)
+            .align_y(Center),
+        )
+        .padding([10, 14])
+        .width(Fill)
+        .style(move |_| style::surface(c, false));
+        let hint = if self.host != Platform::Mac
+            && matches!(self.target, InstallTarget::Mac | InstallTarget::Ios)
+        {
+            L::TargetAppleHostHint
+        } else if self.target == InstallTarget::Ios {
+            L::TargetMobileHint
+        } else if self.target == InstallTarget::Mac {
+            L::TargetMacHint
+        } else {
+            L::TargetDesktopHint
+        };
+        let mut delivery = column![].spacing(8);
+        if self.target == InstallTarget::Ios && self.host == Platform::Mac {
+            use crate::backend::IosDelivery;
+            let mut buttons = row![].spacing(8).width(Fill);
+            for (value, label) in [
+                (IosDelivery::Ipa, L::ExportIpa),
+                (IosDelivery::Device, L::InstallOnDevice),
+            ] {
+                let selected = self.ios_delivery == value;
+                buttons = buttons.push(
+                    button(text(self.language.t(label)).size(13))
+                        .padding([10, 12])
+                        .width(Fill)
+                        .on_press(Message::IosDelivery(value))
+                        .style(move |_, status| style::action(c, selected, status)),
+                );
+            }
+            delivery = delivery.push(buttons);
+        }
+        column![
+            self.title(
+                self.language.t(L::TargetTitle),
+                self.language.t(L::TargetHint)
+            ),
+            column![choices, android].spacing(10),
+            text(self.language.t(hint)).size(13).color(c.muted),
+            delivery,
+        ]
+        .spacing(12)
+        .into()
+    }
+
+    fn ios_signing_view(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        let manual = self.ios_team_manual
+            || self.ios_teams.is_empty()
+            || (!self.ios_team.is_empty()
+                && !self.ios_teams.iter().any(|team| team.id == self.ios_team));
+        let chooser: Element<'_, Message> = if manual {
+            text_input(self.language.t(L::SigningTeamId), &self.ios_team)
+                .on_input(Message::IosTeamChanged)
+                .padding(10)
+                .size(14)
+                .style(move |theme, status| {
+                    let mut look = iced::widget::text_input::default(theme, status);
+                    look.border.radius = 10.into();
+                    look.background = c.surface.into();
+                    look
+                })
+                .into()
+        } else {
+            pick_list(
+                self.ios_teams.as_slice(),
+                self.ios_teams
+                    .iter()
+                    .find(|team| team.id == self.ios_team)
+                    .cloned(),
+                Message::SelectIosTeam,
+            )
+            .placeholder(self.language.t(L::SigningChoose))
+            .padding(10)
+            .text_size(13)
+            .width(Fill)
+            .style(move |theme, status| {
+                let mut look = iced::widget::pick_list::default(theme, status);
+                look.border.radius = 10.into();
+                look.background = c.surface.into();
+                look.border.color = c.line;
+                look
+            })
+            .into()
+        };
+        let mut refresh = button(text(self.language.t(L::RefreshDevices)).size(13))
+            .padding([7, 12])
+            .style(move |_, status| style::action(c, false, status));
+        if !self.ios_signing_busy {
+            refresh = refresh.on_press(Message::RefreshIosSigning);
+        }
+        let mut body = column![
+            self.title(
+                self.language.t(L::SigningTitle),
+                self.language.t(L::SigningHint)
+            ),
+            chooser,
+            row![
+                self.text_action(self.language.t(L::OpenXcode), Message::OpenXcode),
+                refresh
+            ]
+            .spacing(16)
+            .align_y(Center),
+        ]
+        .spacing(8);
+        if !self.ios_teams.is_empty() {
+            body = body.push(self.text_action(
+                self.language.t(if manual {
+                    L::SigningDetected
+                } else {
+                    L::SigningManual
+                }),
+                Message::ManualIosTeam,
+            ));
+        }
+        body = body.push(
+            text(self.language.t(if self.ios_signing_failed {
+                L::SigningFailed
+            } else {
+                L::SigningHelp
+            }))
+            .size(12)
+            .color(c.muted),
+        );
+        body = body.push(
+            text(self.language.t(L::SigningPrivacy))
+                .size(11)
+                .color(c.muted),
+        );
+        body.into()
+    }
+
+    fn ios_devices_view(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        let mut refresh = button(text(self.language.t(L::RefreshDevices)).size(13))
+            .padding([7, 12])
+            .style(move |_, status| style::action(c, false, status));
+        if !self.ios_devices_busy {
+            refresh = refresh.on_press(Message::RefreshIosDevices);
+        }
+        let mut controls = row![refresh].spacing(10).align_y(Center);
+        if self.ios_devices_busy {
+            controls = controls.push(
+                text(self.language.t(L::SearchingDevices))
+                    .size(12)
+                    .color(c.muted),
+            );
+        }
+        let pages = self.ios_devices.len().div_ceil(3);
+        if pages > 1 {
+            controls = controls.push(space().width(Fill));
+            if self.ios_devices_page > 0 {
+                controls = controls.push(self.text_action(
+                    self.language.t(L::PreviousDevices),
+                    Message::IosDevicesPage(-1),
+                ));
+            }
+            controls = controls.push(
+                text(format!("{}/{}", self.ios_devices_page + 1, pages))
+                    .size(12)
+                    .color(c.muted),
+            );
+            if self.ios_devices_page + 1 < pages {
+                controls = controls.push(
+                    self.text_action(self.language.t(L::NextDevices), Message::IosDevicesPage(1)),
+                );
+            }
+        }
+        let mut body = column![
+            self.title(
+                self.language.t(L::DevicesTitle),
+                self.language.t(L::DevicesHint)
+            ),
+            controls,
+        ]
+        .spacing(8);
+        if !self.ios_devices.is_empty() {
+            let devices = column(
+                self.ios_devices
+                    .iter()
+                    .skip(self.ios_devices_page * 3)
+                    .take(3)
+                    .map(|device| {
+                        let selected = self.ios_device.as_deref() == Some(device.id.as_str());
+                        let duplicate = self
+                            .ios_devices
+                            .iter()
+                            .filter(|other| {
+                                other.name == device.name && other.model == device.model
+                            })
+                            .count()
+                            > 1;
+                        let model = if duplicate {
+                            format!(
+                                "{} · …{}",
+                                compact_name(&device.model),
+                                device
+                                    .id
+                                    .chars()
+                                    .rev()
+                                    .take(6)
+                                    .collect::<String>()
+                                    .chars()
+                                    .rev()
+                                    .collect::<String>()
+                            )
+                        } else {
+                            compact_name(&device.model)
+                        };
+                        let state = if !device.connected {
+                            L::DeviceOffline
+                        } else if device.wifi {
+                            L::DeviceWifi
+                        } else {
+                            L::DeviceUsb
+                        };
+                        let label = column![
+                            text(compact_name(&device.name)).size(13),
+                            text(format!("{} · {}", model, self.language.t(state)))
+                                .size(10)
+                                .color(if selected { c.background } else { c.muted }),
+                        ]
+                        .spacing(0);
+                        let mut choice = button(label)
+                            .padding([3, 12])
+                            .width(Fill)
+                            .style(move |_, status| style::action(c, selected, status));
+                        if !self.ios_devices_busy {
+                            choice = choice.on_press(Message::SelectIosDevice(device.id.clone()));
+                        }
+                        choice.into()
+                    }),
+            )
+            .spacing(6);
+            body = body.push(devices);
+        } else if !self.ios_devices_busy {
+            body = body.push(text(self.language.t(L::NoDevices)).size(14));
+        }
+        if self.ios_devices_failed {
+            body = body.push(
+                text(self.language.t(L::DevicesFailed))
+                    .size(12)
+                    .color(c.muted),
+            );
+        } else if !self.ios_devices.iter().any(|d| d.connected) && !self.ios_devices_busy {
+            body = body.push(
+                text(self.language.t(L::DevicesHelp))
+                    .size(12)
+                    .color(c.muted),
+            );
+        }
+        body.into()
+    }
+
+    fn input_view(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        let (title, hint) = match self.page {
+            Page::Keys => (L::KeysTitle, L::KeysStepHint),
+            Page::Game => (L::GameTitle, L::GameHint),
+            _ => (L::UpdateTitle, L::UpdateHint),
+        };
+        let area = match self.page {
+            Page::Keys => self.keys_view(),
+            Page::Game => self.drop_zone(Slot::Base),
+            _ => self.drop_zone(Slot::Update),
+        };
+        let mut body = column![
+            self.title(self.language.t(title), self.language.t(hint)),
+            area
+        ]
+        .spacing(14);
+        let slot = match self.page {
+            Page::Keys => Slot::Keys,
+            Page::Game => Slot::Base,
+            _ => Slot::Update,
+        };
+        if self.saved_input_missing[super::index(slot)] {
+            body = body.push(
+                text(self.language.t(L::SavedInputMissing))
+                    .size(12)
+                    .color(c.error),
+            );
+        }
+        if self.demo
+            && self
+                .source(match self.page {
+                    Page::Keys => Slot::Keys,
+                    Page::Game => Slot::Base,
+                    _ => Slot::Update,
+                })
+                .is_none()
+        {
+            body = body.push(self.text_action(self.language.t(L::UseExample), Message::DemoInput));
+        }
+        body.into()
+    }
+
+    fn drop_zone(&self, slot: Slot) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        let source = self.source(slot);
+        let pending = self.pending[index(slot)].is_some();
+        let highlighted = self.hovered == Some(slot) && self.drag_active;
+        let (information, actions): (Element<'_, Message>, Element<'_, Message>) =
+            if let Some(source) = source {
+                let mut information = column![
+                    text(compact_name(&source.name())).size(16),
+                    text(&source.description).size(12).color(c.muted),
+                ]
+                .spacing(8)
+                .width(Fill);
+                if slot == Slot::Base {
+                    information = information.push(
+                        text(format!(
+                            "{} · {}",
+                            self.language.t(L::Region),
+                            self.language.t(L::RegionPending)
+                        ))
+                        .size(11)
+                        .color(c.muted),
+                    );
+                }
+                (
+                    information.into(),
+                    self.text_action(self.language.t(L::Remove), Message::Remove(slot)),
+                )
+            } else {
+                (
+                    column![
+                        text(
+                            self.language
+                                .t(if pending { L::Inspecting } else { L::Drop })
+                        )
+                        .size(18),
+                        text(self.language.t(L::Formats)).size(12).color(c.muted),
+                    ]
+                    .spacing(8)
+                    .width(Fill)
+                    .into(),
+                    column![
+                        self.file_action(
+                            self.language.t(L::File),
+                            Some(Message::Browse(slot, false)),
+                            false
+                        ),
+                        self.file_action(
+                            self.language.t(L::Folder),
+                            Some(Message::Browse(slot, true)),
+                            false
+                        ),
+                    ]
+                    .spacing(8)
+                    .align_x(iced::Right)
+                    .into(),
+                )
+            };
+        let body = row![
+            information,
+            container(actions)
+                .width(FILE_ACTION_WIDTH)
+                .align_x(iced::Right)
+        ]
+        .spacing(16)
+        .align_y(Center);
+        mouse_area(
+            container(body)
+                .id(drop_target::id(slot))
+                .padding(16)
+                .width(Fill)
+                .style(move |_| style::surface(c, highlighted)),
+        )
+        .on_enter(Message::Hover(Some(slot)))
+        .on_exit(Message::Hover(None))
+        .into()
+    }
+
+    fn keys_view(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        let pending = self.pending[index(Slot::Keys)].is_some();
+        let source = self.keys.as_ref();
+        let information = column![
+            text(if pending {
+                self.language.t(L::Inspecting).into()
+            } else {
+                source
+                    .map(Source::name)
+                    .unwrap_or_else(|| "prod.keys".into())
+            })
+            .size(16),
+            text(
+                source
+                    .map(|s| s.description.as_str())
+                    .unwrap_or_else(|| self.language.t(L::KeysHint))
+            )
+            .size(12)
+            .color(c.muted),
+        ]
+        .spacing(8)
+        .width(Fill);
+        let mut actions = column![
+            self.file_action(
+                self.language
+                    .t(if source.is_some() { L::Change } else { L::File }),
+                Some(Message::Browse(Slot::Keys, false)),
+                false,
+            )
+        ]
+        .spacing(8)
+        .align_x(iced::Right);
+        if source.is_none() {
+            actions = actions.push(self.file_action(
+                self.language.t(L::SearchKeys),
+                (!pending).then_some(Message::FindKeys),
+                false,
+            ));
+        } else {
+            actions = actions
+                .push(self.text_action(self.language.t(L::Remove), Message::Remove(Slot::Keys)));
+        }
+        let mut body = column![
+            row![
+                information,
+                container(actions)
+                    .width(FILE_ACTION_WIDTH)
+                    .align_x(iced::Right)
+            ]
+            .spacing(16)
+            .align_y(Center)
+        ]
+        .spacing(12);
+        if let Some(hint) = &self.key_hint {
+            body = body.push(text(hint).size(12).color(c.muted));
+        }
+        let highlighted = self.hovered == Some(Slot::Keys) && self.drag_active;
+        mouse_area(
+            container(body)
+                .id(drop_target::id(Slot::Keys))
+                .padding(16)
+                .width(Fill)
+                .style(move |_| style::surface(c, highlighted)),
+        )
+        .on_enter(Message::Hover(Some(Slot::Keys)))
+        .on_exit(Message::Hover(None))
+        .into()
+    }
+
+    fn firmware_view(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        let name = self
+            .firmware
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| compact_name(&n.to_string_lossy()))
+            .unwrap_or_else(|| self.language.t(L::FirmwareDrop).into());
+        let busy = self.firmware_pending.is_some();
+        let choose = |label, folder| {
+            button(text(self.language.t(label)).size(13))
+                .padding([10, 14])
+                .width(160)
+                .on_press_maybe((!busy).then_some(Message::ChooseFirmware(folder)))
+                .style(move |_, status| style::action(c, false, status))
+        };
+        let mut heading = row![text(name).size(16)].spacing(8).align_y(Center);
+        if self.firmware.is_some() {
+            heading = heading
+                .push(space().width(Fill))
+                .push(self.text_action(self.language.t(L::Remove), Message::RemoveFirmware));
+        }
+        let card = column![
+            heading,
+            text(if busy {
+                self.language.t(L::FirmwareSearching)
+            } else {
+                self.firmware_hint
+                    .as_deref()
+                    .unwrap_or_else(|| self.language.t(L::FirmwareFormats))
+            })
+            .size(12)
+            .color(c.muted),
+            row![choose(L::FirmwareZip, false), choose(L::Folder, true)].spacing(10),
+        ]
+        .spacing(8);
+        column![
+            self.title(
+                self.language.t(L::FirmwareTitle),
+                self.language.t(L::FirmwareHint)
+            ),
+            container(card)
+                .padding(12)
+                .width(Fill)
+                .style(move |_| style::surface(c, self.drag_active)),
+            container(
+                text(self.language.t(L::FirmwareWithout))
+                    .size(13)
+                    .color(c.muted)
+            )
+            .padding(10)
+            .width(Fill)
+            .style(move |_| style::surface(c, false)),
+        ]
+        .spacing(12)
+        .into()
+    }
+
+    fn mods_folder_view(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        let folder = self
+            .chosen_mod_folder
+            .as_ref()
+            .or(self.mods_folder.as_ref())
+            .map(|path| compact_name(&path.display().to_string()))
+            .unwrap_or_else(|| self.language.t(L::ModsFolderUnavailable).into());
+        let folder_card = container(
+            column![
+                row![
+                    text(self.language.t(L::ModsFolder))
+                        .size(12)
+                        .color(c.muted)
+                        .width(Fill),
+                    self.text_action(self.language.t(L::OpenModsFolder), Message::OpenModsFolder),
+                    self.text_action(
+                        self.language.t(L::ChooseModFolder),
+                        Message::ChooseModFolder
+                    ),
+                ]
+                .spacing(16)
+                .align_y(Center),
+                text(folder).size(11).color(c.muted),
+            ]
+            .spacing(8),
+        )
+        .padding(12)
+        .width(Fill)
+        .style(move |_| style::surface(c, false));
+        let mut body = column![
+            self.title(self.language.t(L::ModsTitle), self.language.t(L::ModsHint)),
+            folder_card,
+            // Windows has no mod dialog in the game app: a mod becomes its own app and is read from this folder.
+            text(self.language.t(if self.target == InstallTarget::Windows {
+                L::ModsOwnApp
+            } else {
+                L::RomFSNoBuild
+            }))
+            .size(12)
+            .color(c.muted),
+        ]
+        .spacing(14);
+        if self.target == InstallTarget::Ios {
+            body = body.push(
+                text(self.language.t(L::ModsDeviceHint))
+                    .size(11)
+                    .color(c.muted),
+            );
+        }
+        body.into()
+    }
+
+    fn mods_view(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        let vanilla = self.mod_choice(self.language.t(L::UnmodifiedGame), None, None);
+        let mut choices = column![vanilla].spacing(6);
+        for item in &self.mods {
+            let tag = if item.has_exefs {
+                if self.ips_target() && item.ips_buildable() {
+                    L::ExeFSBuildReadyTag
+                } else {
+                    L::ExeFSBuildNeeded
+                }
+            } else {
+                L::RomFSOnly
+            };
+            choices = choices.push(self.mod_choice(
+                &item.name,
+                Some(&item.name),
+                Some(self.language.t(tag)),
+            ));
+        }
+        let list: Element<'_, Message> = if self.mods.len() > 3 {
+            scrollable(choices).height(156).into()
+        } else {
+            choices.into()
+        };
+        let selected = self
+            .selected_mod
+            .as_ref()
+            .and_then(|name| self.mods.iter().find(|item| &item.name == name));
+        let mut body = column![
+            self.title(
+                self.language.t(L::ModsChooseTitle),
+                self.language.t(L::ModsChooseHint)
+            ),
+            row![
+                self.text_action(self.language.t(L::OpenModsFolder), Message::OpenModsFolder),
+                self.text_action(
+                    self.language.t(L::ChooseModFolder),
+                    Message::ChooseModFolder
+                ),
+                self.text_action(self.language.t(L::RefreshMods), Message::RefreshMods),
+            ]
+            .spacing(18),
+            list,
+        ]
+        .spacing(12);
+        if self.mods_scanning {
+            body = body.push(text(self.language.t(L::Inspecting)).size(12).color(c.muted));
+        } else if self.mods.is_empty() {
+            body = body.push(text(self.language.t(L::NoMods)).size(12).color(c.muted));
+        }
+        if let Some(item) = selected {
+            if item.has_exefs {
+                body = body.push(
+                    text(
+                        self.language
+                            .t(if self.ips_target() && item.ips_buildable() {
+                                L::ExeFSBuildReady
+                            } else if item.ips_buildable() {
+                                L::ExeFSWarning
+                            } else {
+                                L::ExeFSUnsupported
+                            }),
+                    )
+                    .size(12)
+                    .color(c.muted),
+                );
+            }
+        }
+        if self.demo && self.mods.is_empty() {
+            body = body.push(self.text_action(self.language.t(L::UseExample), Message::DemoMod));
+        }
+        if selected.is_none_or(|item| !item.has_exefs) {
+            body = body.push(
+                text(self.language.t(L::ModsPreviewHint))
+                    .size(11)
+                    .color(c.muted),
+            );
+        }
+        body.into()
+    }
+
+    fn mod_choice<'a>(
+        &self,
+        label: &'a str,
+        name: Option<&'a str>,
+        tag: Option<&'a str>,
+    ) -> Element<'a, Message> {
+        let c = style::colors(self.appearance);
+        let selected = self.selected_mod.as_deref() == name;
+        let mut content = row![text(compact_name(label)).size(13).width(Fill)].align_y(Center);
+        if let Some(tag) = tag {
+            content = content.push(text(tag).size(10).color(if selected {
+                c.accent_text
+            } else {
+                c.muted
+            }));
+        }
+        button(content)
+            .padding([8, 12])
+            .width(Fill)
+            .on_press(Message::SelectMod(name.map(str::to_owned)))
+            .style(move |_, status| style::action(c, selected, status))
+            .into()
+    }
+
+    fn review_view(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        if self.ios_profile_open {
+            let mut body = column![
+                self.title(
+                    self.language.t(L::ModProfileTitle),
+                    self.language.t(L::ModProfileHint)
+                ),
+                row![
+                    self.action(
+                        self.language.t(L::NewModProfile),
+                        Some(Message::NewIosProfile),
+                        self.ios_profile.is_none()
+                    ),
+                    self.action(
+                        self.language.t(L::ChoosePreviousIpa),
+                        Some(Message::ChooseIosProfile),
+                        self.ios_profile.is_some()
+                    ),
+                ]
+                .spacing(12),
+            ]
+            .spacing(16);
+            if let Some(profile) = &self.ios_profile {
+                body = body.push(
+                    text(
+                        self.language
+                            .t(L::ProfileReusedHint)
+                            .replace("{name}", &compact_name(&profile.name)),
+                    )
+                    .size(13)
+                    .color(c.muted),
+                );
+            }
+            return body.into();
+        }
+        let ipa_export = self.target == InstallTarget::Ios
+            && self.ios_delivery == crate::backend::IosDelivery::Ipa;
+        let summary = column![
+            self.summary(
+                self.language.t(L::Base),
+                self.base.as_ref().map(Source::name).unwrap_or_default()
+            ),
+            self.summary(
+                self.language.t(L::Region),
+                self.language.t(L::RegionPending).into()
+            ),
+            self.summary(
+                self.language.t(L::Update),
+                self.update
+                    .as_ref()
+                    .map(Source::name)
+                    .unwrap_or_else(|| self.language.t(L::NoUpdate).into())
+            ),
+            self.summary(
+                self.language.t(L::Keys),
+                self.keys.as_ref().map(Source::name).unwrap_or_default()
+            ),
+            if matches!(self.target, InstallTarget::Linux | InstallTarget::Ios) {
+                space().height(0).into()
+            } else {
+                self.summary(
+                    self.language.t(L::Computer),
+                    format!(
+                        "{} · {}",
+                        self.host.label(),
+                        if self.simulated_platform {
+                            self.language.t(L::Simulation)
+                        } else {
+                            std::env::consts::ARCH
+                        }
+                    ),
+                )
+            },
+            self.summary(self.language.t(L::Target), self.target.label().into()),
+        ]
+        .spacing(if ipa_export { 2 } else { 4 });
+        let summary = if let Some(path) = &self.firmware {
+            summary.push(self.summary(
+                self.language.t(L::Firmware),
+                compact_name(&path.file_name().unwrap_or_default().to_string_lossy()),
+            ))
+        } else {
+            summary
+        };
+        let summary = if let Some(name) = &self.selected_mod {
+            if self
+                .mods
+                .iter()
+                .any(|item| &item.name == name && item.has_exefs && item.ips_buildable())
+            {
+                summary.push(self.summary(self.language.t(L::ModAppResult), name.clone()))
+            } else {
+                summary.push(self.summary(self.language.t(L::Mods), name.clone()))
+            }
+        } else {
+            summary
+        };
+        let summary = if self.target == InstallTarget::Linux {
+            summary.push(
+                column![
+                    toggler(!self.portable_cpu)
+                        .label(self.language.t(L::OptimizeCpu))
+                        .text_size(14)
+                        .on_toggle(Message::OptimizeCpu),
+                    text(self.language.t(if self.portable_cpu {
+                        L::PortableCpuHint
+                    } else if self.experimental_target() {
+                        L::OptimizeCpuHintArm
+                    } else {
+                        L::OptimizeCpuHint
+                    }))
+                    .size(12)
+                    .color(c.muted),
+                ]
+                .spacing(4),
+            )
+        } else {
+            summary
+        };
+        // An IPA export adds the data warning and its switch (and for a mod the profile link) to this page: tighter spacing keeps it in the compact window.
+        let (padding, gap) = if ipa_export { (10, 8) } else { (16, 14) };
+        let heading: Element<'_, Message> = if ipa_export {
+            text(self.language.t(L::ReviewTitle)).size(23).into()
+        } else {
+            self.title(
+                self.language.t(L::ReviewTitle),
+                self.language.t(L::ReviewHint),
+            )
+        };
+        let mut body = column![
+            heading,
+            container(summary)
+                .padding(padding)
+                .width(Fill)
+                .style(move |_| style::surface(c, false)),
+        ]
+        .spacing(gap);
+        if ipa_export {
+            // No framed box: the review page has to fit the compact window without scrolling.
+            body = body.push(
+                column![
+                    text(self.language.t(if self.ios_export_no_embed {
+                        L::ExportWithoutDataHint
+                    } else {
+                        L::IpaReviewWarning
+                    }))
+                    .size(12)
+                    .color(c.muted),
+                    toggler(self.ios_export_no_embed)
+                        .label(self.language.t(L::ExportWithoutData))
+                        .text_size(14)
+                        .on_toggle(Message::ExportWithoutData),
+                ]
+                .spacing(6)
+                .width(Fill),
+            );
+        }
+        if self.target == InstallTarget::Ios
+            && self.host == Platform::Mac
+            && self.ios_delivery == crate::backend::IosDelivery::Ipa
+            && self.selected_mod.is_some()
+        {
+            body = body.push(self.text_action(
+                self.language.t(L::ReuseModProfile),
+                Message::IosProfileView(true),
+            ));
+        }
+        body.into()
+    }
+
+    /// The Windows components are being prepared: which step, how far, how fast. Shown instead of the requirements list.
+    fn components_view(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        let p = &self.setup_progress;
+        let name = match p.id.as_str() {
+            "qt" => "Qt",
+            "toolchain" => "LLVM-MinGW",
+            "sdl" => "SDL3",
+            "ffmpeg" => "FFmpeg",
+            _ => "",
+        };
+        let step = match (p.id.as_str(), p.phase.as_str()) {
+            ("source", _) => self.language.t(L::StepSource).to_owned(),
+            ("versions", _) => self.language.t(L::StepVersions).to_owned(),
+            ("bundle", _) => self.language.t(L::StepBundle).to_owned(),
+            ("tools", _) => self.language.t(L::StepTools).to_owned(),
+            ("register", _) => self.language.t(L::StepRegister).to_owned(),
+            (_, "download") => self.language.t(L::StepDownload).replace("{}", name),
+            (_, "unpack") => self.language.t(L::StepUnpack).replace("{}", name),
+            _ => self.language.t(L::Running).to_owned(),
+        };
+        let mut detail = String::new();
+        if p.phase == "download" && p.size > 0 {
+            detail = format!(
+                "{} / {}",
+                crate::progress::format_bytes(p.done),
+                crate::progress::format_bytes(p.size)
+            );
+            if p.bytes_per_second > 1.0 {
+                detail.push_str(&format!(
+                    " \u{b7} {}",
+                    crate::progress::format_speed(p.bytes_per_second)
+                ));
+            }
+            if let Some(seconds) = p.seconds_left() {
+                let left =
+                    crate::progress::format_duration(std::time::Duration::from_secs(seconds));
+                detail.push_str(&format!(
+                    " \u{b7} {}",
+                    self.language.t(L::SecondsLeft).replace("{}", &left)
+                ));
+            }
+        }
+        let mut notes = column![].spacing(8);
+        if self.defender == Some(true) && matches!(p.phase.as_str(), "unpack" | "work") {
+            notes = notes.push(
+                text(self.language.t(L::DefenderNote))
+                    .size(12)
+                    .color(c.muted),
+            );
+        }
+        column![
+            self.title(
+                self.language.t(L::PreparingTitle),
+                self.language.t(L::PreparingHint)
+            ),
+            container(
+                column![
+                    column![
+                        text(
+                            self.language
+                                .t(L::StepOf)
+                                .replacen("{}", &p.index.max(1).to_string(), 1)
+                                .replacen("{}", &p.total.max(1).to_string(), 1)
+                        )
+                        .size(12)
+                        .color(c.muted),
+                        text(step).size(16).width(Fill),
+                        text(detail).size(12).color(c.muted).width(Fill),
+                    ]
+                    .spacing(8)
+                    .width(Fill),
+                    progress_bar(0.0..=1.0, p.fraction())
+                        .girth(5)
+                        .style(move |_| style::progress(c)),
+                ]
+                .spacing(16)
+            )
+            .padding(16)
+            .width(Fill)
+            .style(move |_| style::surface(c, false)),
+            notes,
+        ]
+        .spacing(14)
+        .into()
+    }
+
+    fn settings_view(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        column![
+            text(self.language.t(L::Settings)).size(23),
+            text(self.language.t(L::InterfaceLanguage))
+                .size(13)
+                .color(c.muted),
+            pick_list(
+                Language::ALL.as_slice(),
+                Some(self.language),
+                Message::SelectLanguage,
+            )
+            .padding(10)
+            .text_size(13)
+            .width(Fill)
+            .style(move |theme, status| {
+                let mut look = iced::widget::pick_list::default(theme, status);
+                look.border.radius = 10.into();
+                look.background = c.surface.into();
+                look.border.color = c.line;
+                look
+            }),
+        ]
+        .spacing(10)
+        .into()
+    }
+
+    fn setup_view(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        if self.setup_busy {
+            return self.components_view();
+        }
+        if let Some(failure) = &self.setup_failure {
+            return column![
+                column![
+                    text(self.language.t(L::SetupFailed).replace("{}", &failure.step)).size(20),
+                    text(self.language.t(L::SetupFailedHint))
+                        .size(13)
+                        .color(c.muted),
+                ]
+                .spacing(8),
+                container(
+                    scrollable(text(failure.error.as_str()).size(12).color(c.error)).height(110)
+                )
+                .padding(12)
+                .width(Fill)
+                .style(move |_| style::surface(c, false)),
+                row![
+                    button(text(self.language.t(L::Retry)).size(12))
+                        .padding([8, 12])
+                        .on_press(Message::InstallRequirements)
+                        .style(move |_, status| style::action(c, true, status)),
+                    button(text(self.language.t(L::CopyLog)).size(12))
+                        .padding([8, 12])
+                        .on_press(Message::CopyLog)
+                        .style(move |_, status| style::action(c, false, status)),
+                ]
+                .spacing(10),
+            ]
+            .spacing(12)
+            .into();
+        }
+        if self.build_options_open {
+            let folders: Element<'_, Message> = if self.host == Platform::Windows {
+                column![
+                    self.folder_setting(
+                        self.language.t(L::BuildFolder),
+                        self.language.t(L::BuildFolderHint),
+                        &self.work_folder,
+                        FolderSetting::Work
+                    ),
+                    self.folder_setting(
+                        self.language.t(L::InstallFolder),
+                        self.language.t(L::InstallFolderHint),
+                        &self.install_folder,
+                        FolderSetting::Install
+                    ),
+                ]
+                .spacing(16)
+                .into()
+            } else {
+                space().height(0).into()
+            };
+            return column![
+                self.title(
+                    self.language.t(L::BuildOptions),
+                    self.language.t(L::BuildOptionsHint)
+                ),
+                folders,
+                column![
+                    toggler(self.clean_build)
+                        .label(self.language.t(L::CleanBuild))
+                        .text_size(14)
+                        .on_toggle(Message::CleanBuild),
+                    text(self.language.t(L::CleanBuildHint))
+                        .size(12)
+                        .color(c.muted),
+                ]
+                .spacing(5),
+                column![
+                    toggler(self.auto_cleanup)
+                        .label(self.language.t(L::AutoCleanup))
+                        .text_size(14)
+                        .on_toggle(Message::AutoCleanup),
+                    text(self.language.t(L::AutoCleanupHint))
+                        .size(12)
+                        .color(c.muted),
+                ]
+                .spacing(5),
+                text(self.language.t(L::FailedBuildKept))
+                    .size(11)
+                    .color(c.muted),
+            ]
+            .spacing(16)
+            .into();
+        }
+        if let Some(plan) = &self.requirements
+            && !plan.ready()
+        {
+            return column![
+                self.title(
+                    self.language.t(L::DependenciesTitle),
+                    self.language.t(L::DependenciesHint)
+                ),
+                scrollable(text(super::localized_plan_description(plan, self.language)).size(12))
+                    .height(130),
+            ]
+            .spacing(12)
+            .into();
+        }
+        let device_actions: Element<'_, Message> = if self.target == InstallTarget::Ios
+            && self.ios_delivery == crate::backend::IosDelivery::Device
+            && self.host == Platform::Mac
+        {
+            row![
+                self.text_action(self.language.t(L::ChangeDevice), Message::OpenIosDevices),
+                self.text_action(self.language.t(L::SigningSetup), Message::OpenIosSigning)
+            ]
+            .spacing(14)
+            .into()
+        } else {
+            space().height(0).into()
+        };
+        let experimental_note: Element<'_, Message> = if self.experimental_target() {
+            text(self.language.t(L::ExperimentalArm))
+                .size(12)
+                .color(c.muted)
+                .into()
+        } else {
+            space().height(0).into()
+        };
+        column![
+            self.title(
+                self.language.t(L::SetupTitle),
+                self.language.t(L::SetupHint)
+            ),
+            text(self.language.t(
+                if self.host != Platform::Mac
+                    && matches!(self.target, InstallTarget::Mac | InstallTarget::Ios)
+                {
+                    L::SetupAppleHost
+                } else if self.target == InstallTarget::Mac {
+                    L::SetupMac
+                } else if self.target == InstallTarget::Ios {
+                    if self.ios_delivery == crate::backend::IosDelivery::Ipa {
+                        L::IpaExportHint
+                    } else {
+                        L::SetupMobile
+                    }
+                } else {
+                    L::SetupDesktop
+                }
+            ))
+            .size(13)
+            .color(c.muted),
+            text(self.language.t(if self.demo {
+                L::PreviewHint
+            } else if self.backend_supported() {
+                L::BackendHint
+            } else {
+                L::BackendUnavailable
+            }))
+            .size(12)
+            .color(c.muted),
+            experimental_note,
+            device_actions,
+            self.text_action(
+                self.language.t(L::BuildOptions),
+                Message::BuildOptions(true)
+            ),
+        ]
+        .spacing(18)
+        .into()
+    }
+
+    /// What was exported: where, how large, with or without the game data, and whether a Game Library exists.
+    pub(super) fn ipa_result_text(&self) -> String {
+        let Some(path) = &self.exported_ipa else {
+            return String::new();
+        };
+        let key = if self.game_library.is_some() {
+            L::IpaResultSeparate
+        } else if self.ios_export_no_embed {
+            L::IpaResultMissingLibrary
+        } else {
+            L::IpaResultEmbedded
+        };
+        let text = self
+            .language
+            .t(key)
+            .replace("{path}", &super::redact_home_path(&path.to_string_lossy()));
+        match self.exported_ipa_size {
+            Some(size) => text.replace("{size}", &super::human_size(size)),
+            // Without a size the " ({size})" part goes, not just the number (no empty brackets).
+            None => text.replace(" ({size})", ""),
+        }
+    }
+
+    fn progress_view(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        if !self.demo && self.backend_status != super::BackendStatus::Idle {
+            let stage = self.build_progress.active;
+            let state = self.build_progress.stages[stage.index()];
+            let status = if self.cleanup_busy {
+                L::Cleanup
+            } else {
+                self.build_labels()[stage.index()]
+            };
+            let detail = match self.backend_status {
+                super::BackendStatus::Running if stage == crate::progress::Stage::Requirements => {
+                    L::CheckingRequirements
+                }
+                super::BackendStatus::Running => status,
+                super::BackendStatus::Passed => L::BuildPassed,
+                super::BackendStatus::Failed => L::BuildFailed,
+                super::BackendStatus::Stopped => L::BuildStopped,
+                super::BackendStatus::Idle => unreachable!(),
+            };
+            let activity = (self.backend_status == super::BackendStatus::Running
+                && !self.cleanup_busy)
+                .then(|| {
+                    self.build_progress
+                        .activity_text(self.language, std::time::Instant::now())
+                })
+                .flatten();
+            let counter = match stage {
+                crate::progress::Stage::Compile if state.total > 0 => format!(
+                    "{} / {} {}",
+                    state.completed,
+                    state.total,
+                    self.language.t(L::FilesCompiled)
+                ),
+                crate::progress::Stage::Generate
+                    if !self.build_progress.generator.module.is_empty() =>
+                {
+                    let g = &self.build_progress.generator;
+                    let phase = if g.phase == "analyze" {
+                        self.language.t(L::AnalyzingModule).to_owned()
+                    } else {
+                        format!(
+                            "{} / {} {}",
+                            g.completed,
+                            g.total,
+                            self.language.t(L::FunctionsGenerated)
+                        )
+                    };
+                    format!(
+                        "{} {} / {} · {}\n{}",
+                        self.language.t(L::Module),
+                        (g.modules_completed + 1).min(g.modules_total),
+                        g.modules_total,
+                        g.module,
+                        phase
+                    )
+                }
+                crate::progress::Stage::Generate if state.total > 0 => format!(
+                    "{} / {} {}",
+                    state.completed,
+                    state.total,
+                    self.language.t(L::ModulesGenerated)
+                ),
+                crate::progress::Stage::Requirements if state.total > 0 && !state.done => self
+                    .language
+                    .t(L::StepOf)
+                    .replacen("{}", &state.completed.to_string(), 1)
+                    .replacen("{}", &state.total.to_string(), 1),
+                crate::progress::Stage::Extract
+                    if !state.done && (state.total > 0 || self.build_progress.step.is_some()) =>
+                {
+                    let mut parts = Vec::new();
+                    if let Some((n, m)) = self.build_progress.step {
+                        parts.push(
+                            self.language
+                                .t(L::StepOf)
+                                .replacen("{}", &n.to_string(), 1)
+                                .replacen("{}", &m.to_string(), 1),
+                        );
+                    }
+                    if state.total > 0 {
+                        parts.push(format!("{} %", state.completed * 100 / state.total));
+                    }
+                    parts.join(" \u{b7} ")
+                }
+                crate::progress::Stage::Firmware if state.total > 0 && !state.done => format!(
+                    "{} / {} {}",
+                    state.completed,
+                    state.total,
+                    self.language.t(L::FirmwareChecked)
+                ),
+                crate::progress::Stage::Shaders if state.total > 0 && !state.done => format!(
+                    "{} / {} {}",
+                    state.completed,
+                    state.total,
+                    self.language.t(L::ShadersPrepared)
+                ),
+                crate::progress::Stage::Shaders if state.completed > 0 && !state.done => format!(
+                    "{} {}",
+                    state.completed,
+                    self.language.t(L::ShadersTranslated)
+                ),
+                crate::progress::Stage::Install if state.total > 0 && !state.done => {
+                    let copy = &self.build_progress.copy;
+                    let mut text = format!(
+                        "{} / {} {}",
+                        state.completed,
+                        state.total,
+                        self.language.t(L::FilesCopied)
+                    );
+                    if copy.total > 0 {
+                        text.push_str(&format!(
+                            " \u{b7} {} / {}",
+                            crate::progress::format_bytes(copy.completed),
+                            crate::progress::format_bytes(copy.total)
+                        ));
+                        if let Some(speed) = copy.speed() {
+                            text.push_str(&format!("\n{}", crate::progress::format_speed(speed)));
+                            if let Some(left) = copy.remaining() {
+                                text.push_str(&format!(
+                                    " \u{b7} {} {}",
+                                    crate::progress::format_duration(left),
+                                    self.language.t(L::TimeLeft)
+                                ));
+                            }
+                        }
+                    }
+                    text
+                }
+                _ if activity.is_some() => String::new(),
+                _ => self
+                    .language
+                    .t(match self.backend_status {
+                        super::BackendStatus::Running => L::Running,
+                        super::BackendStatus::Passed => L::Done,
+                        super::BackendStatus::Failed => L::NeedsAttention,
+                        super::BackendStatus::Stopped => L::BuildStopped,
+                        super::BackendStatus::Idle => unreachable!(),
+                    })
+                    .to_owned(),
+            };
+            let note_shown = self.defender == Some(true)
+                && self.backend_status == super::BackendStatus::Running
+                && matches!(
+                    stage,
+                    crate::progress::Stage::Extract
+                        | crate::progress::Stage::Package
+                        | crate::progress::Stage::Install
+                );
+            let counter = if note_shown {
+                format!("{counter}\n{}", self.language.t(L::DefenderNote))
+            } else {
+                counter
+            };
+            // The IPA result (text, steps, links) has to fit the compact window under the card: the card is tighter then.
+            let ipa_done = self.backend_status == super::BackendStatus::Passed
+                && self.exported_ipa.is_some()
+                && self.ios_delivery == crate::backend::IosDelivery::Ipa
+                && self.target == InstallTarget::Ios;
+            // The security note adds two lines to the card, so the card is tighter then too.
+            let tight = ipa_done || note_shown;
+            return column![
+                self.title(self.language.t(L::ProgressTitle), self.language.t(detail)),
+                container(
+                    column![
+                        {
+                            let elapsed = self
+                                .build_progress
+                                .elapsed(std::time::Instant::now())
+                                .map(|elapsed| {
+                                    format!(
+                                        "{} {}",
+                                        crate::progress::format_clock(elapsed),
+                                        self.language.t(L::TimeElapsed)
+                                    )
+                                })
+                                .unwrap_or_default();
+                            let mut lines = column![
+                                row![
+                                    text(self.language.t(status)).size(16).width(Fill),
+                                    text(elapsed).size(12).color(c.muted),
+                                ]
+                                .spacing(8)
+                                .align_y(Center)
+                            ];
+                            if let Some(activity) = activity {
+                                lines = lines.push(text(activity.headline).size(14).width(Fill));
+                                if let Some(detail) = activity.detail {
+                                    lines = lines
+                                        .push(text(detail).size(11).color(c.muted).width(Fill));
+                                }
+                            }
+                            if !counter.is_empty() {
+                                lines =
+                                    lines.push(text(counter).size(12).color(c.muted).width(Fill));
+                            }
+                            lines.spacing(if note_shown { 6 } else { 8 }).width(Fill)
+                        },
+                        progress_bar(
+                            0.0..=1.0,
+                            (self.motion.value - stage.index() as f32).clamp(0.0, 1.0)
+                        )
+                        .girth(5)
+                        .style(move |_| style::progress(c)),
+                    ]
+                    .spacing(if tight { 10 } else { 16 })
+                )
+                .padding(if tight { 12 } else { 16 })
+                .width(Fill)
+                .style(move |_| style::surface(c, false)),
+                if ipa_done {
+                    column![
+                        text(self.ipa_result_text()).size(13).color(c.muted),
+                        if self.game_library.is_none() && self.ios_export_no_embed {
+                            space().height(0).into()
+                        } else {
+                            Element::from(
+                                text(self.language.t(if self.game_library.is_some() {
+                                    L::IpaInstallSteps
+                                } else {
+                                    L::IpaInstallStepsEmbedded
+                                }))
+                                .size(12)
+                                .color(c.muted),
+                            )
+                        },
+                        row![
+                            self.text_action(
+                                self.language.t(L::ShowIpa),
+                                Message::ShowInstalledApp
+                            ),
+                            if self.game_library.is_some() {
+                                self.text_action(
+                                    self.language.t(L::ShowGameLibrary),
+                                    Message::ShowGameLibrary,
+                                )
+                            } else {
+                                space().width(0).into()
+                            }
+                        ]
+                        .spacing(12),
+                    ]
+                    .spacing(4)
+                    .into()
+                } else if self.backend_status == super::BackendStatus::Passed
+                    && self.installed_app.is_some()
+                {
+                    let app = self.installed_app.as_ref().unwrap();
+                    let folder = app
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    column![
+                        text(self.language.t(L::InstalledIn).replace("{folder}", &folder))
+                            .size(13)
+                            .color(c.muted),
+                        text(
+                            app.file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned()
+                        )
+                        .size(15),
+                        row![
+                            self.text_action(
+                                self.language.t(L::LaunchApp),
+                                Message::LaunchInstalledApp
+                            ),
+                            self.text_action(
+                                self.language
+                                    .t(if self.host == crate::platform::Platform::Mac {
+                                        L::ShowInFinder
+                                    } else {
+                                        L::ShowInFolder
+                                    }),
+                                Message::ShowInstalledApp
+                            ),
+                        ]
+                        .spacing(16),
+                    ]
+                    .spacing(8)
+                    .into()
+                } else if stage == crate::progress::Stage::Requirements {
+                    column![].into()
+                } else {
+                    self.progress_context(stage.index())
+                },
+            ]
+            .spacing(14)
+            .into();
+        }
+        let stages = self.build_stages();
+        let stage = stages[((self.tick / 10) as usize).min(stages.len() - 1)].index();
+        let counter = if stage == crate::progress::Stage::Compile.index() {
+            format!(
+                "{} / 2369 {}",
+                ((self.tick % 10) as u64 * 2369 / 10),
+                self.language.t(L::FilesCompiled)
+            )
+        } else if stage == crate::progress::Stage::Generate.index() {
+            format!(
+                "{} / 4 {}",
+                ((self.tick % 10) as u64 * 4 / 10),
+                self.language.t(L::ModulesGenerated)
+            )
+        } else {
+            format!(
+                "{} · {} %",
+                self.language.t(L::Running),
+                (self.tick % 10) * 10
+            )
+        };
+        column![
+            self.title(
+                self.language.t(L::ProgressTitle),
+                self.language.t(L::Simulated)
+            ),
+            container(
+                column![
+                    row![
+                        text(self.language.t(self.build_labels()[stage]))
+                            .size(16)
+                            .width(Fill),
+                        text(counter).size(12).color(c.muted),
+                    ]
+                    .spacing(12)
+                    .align_y(Center),
+                    progress_bar(
+                        0.0..=1.0,
+                        (self.motion.value - stage as f32).clamp(0.0, 1.0)
+                    )
+                    .girth(5)
+                    .style(move |_| style::progress(c)),
+                ]
+                .spacing(16)
+            )
+            .padding(16)
+            .width(Fill)
+            .style(move |_| style::surface(c, false)),
+            self.progress_context(stage),
+        ]
+        .spacing(14)
+        .into()
+    }
+
+    fn progress_context(&self, stage: usize) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        let labels = self.build_labels();
+        let mut context = column![].spacing(10);
+        let stages = self.build_stages();
+        let previous = stages.iter().rev().find(|item| {
+            item.index() < stage
+                && (self.demo
+                    || self.capture.is_some()
+                    || self.build_progress.stages[item.index()].done)
+        });
+        if let Some(previous) = previous {
+            context = context.push(
+                row![
+                    text(self.language.t(L::CompletedStage))
+                        .size(12)
+                        .color(c.muted)
+                        .width(105),
+                    text(self.language.t(labels[previous.index()])).size(12),
+                ]
+                .spacing(8),
+            );
+        }
+        if let Some(next) = stages.iter().find(|item| item.index() > stage) {
+            context = context.push(
+                row![
+                    text(self.language.t(L::NextStage))
+                        .size(12)
+                        .color(c.muted)
+                        .width(105),
+                    text(self.language.t(labels[next.index()])).size(12),
+                ]
+                .spacing(8),
+            );
+        }
+        context.into()
+    }
+
+    fn navigation(&self) -> Element<'_, Message> {
+        let mut actions = row![].spacing(12).align_y(Center);
+        if self.settings_open {
+            return actions
+                .push(self.text_action(self.language.t(L::Back), Message::Back))
+                .into();
+        }
+        if self.ios_devices_open
+            || self.ios_signing_open
+            || (self.page != Page::Target && self.page != Page::Progress)
+        {
+            actions = actions.push(self.text_action(self.language.t(L::Back), Message::Back));
+        }
+        actions = actions.push(space().width(Fill));
+        if !self.ios_devices_open
+            && !self.ios_signing_open
+            && self.page == Page::Setup
+            && self.requirements.as_ref().is_some_and(|p| !p.ready())
+        {
+            actions =
+                actions.push(self.text_action(self.language.t(L::CheckAgain), Message::Preview));
+        }
+        let (label, message, primary) = if self.ios_devices_open || self.ios_signing_open {
+            (L::Continue, self.ready().then_some(Message::Review), true)
+        } else {
+            match self.page {
+                Page::Progress if self.cleanup_busy => (L::Cleanup, None, false),
+                Page::Progress if self.backend_status == super::BackendStatus::Running => (
+                    if self.demo { L::Stop } else { L::CancelBuild },
+                    Some(Message::Back),
+                    false,
+                ),
+                Page::Progress
+                    if self.backend_status != super::BackendStatus::Idle && !self.demo =>
+                {
+                    (L::ReturnToSetup, Some(Message::Back), false)
+                }
+                Page::Progress => (L::Stop, Some(Message::Back), false),
+                Page::Setup if self.demo => (L::StartPreview, Some(Message::Preview), true),
+                Page::Setup if self.updating => (L::UpdateDownloading, None, false),
+                Page::Setup if self.requirements_busy => (L::CheckingRequirements, None, false),
+                Page::Setup if self.setup_busy => (L::StepTools, None, false),
+                Page::Setup if self.requirements.is_some() => (
+                    L::InstallDependencies,
+                    Some(Message::InstallRequirements),
+                    true,
+                ),
+                Page::Setup if self.backend_supported() => {
+                    (L::StartBuild, Some(Message::Preview), true)
+                }
+                Page::Setup => (L::BackendUnavailable, None, false),
+                Page::Update if self.update.is_none() => {
+                    (L::SkipUpdate, self.ready().then_some(Message::Review), true)
+                }
+                _ => (L::Continue, self.ready().then_some(Message::Review), true),
+            }
+        };
+        let c = style::colors(self.appearance);
+        if self.page == Page::Firmware {
+            actions = actions.push(
+                button(text(self.language.t(L::SkipMods)).size(14))
+                    .padding([10, 20])
+                    .on_press_maybe(
+                        self.firmware_pending
+                            .is_none()
+                            .then_some(Message::SkipFirmware),
+                    )
+                    .style(move |_, status| style::action(c, false, status)),
+            );
+        }
+        if matches!(self.page, Page::ModsFolder | Page::Mods) {
+            actions =
+                actions.push(self.text_action(self.language.t(L::SkipMods), Message::SkipMods));
+        }
+        let countdown = self
+            .auto_build_progress()
+            .filter(|_| self.page == Page::Setup && message.is_some());
+        let label = self.language.t(label);
+        if let Some(progress) = countdown {
+            let eased = style::ease(progress);
+            actions = actions.push(self.text_action(
+                self.language.t(L::CancelAutoStart),
+                Message::CancelAutoBuild,
+            ));
+            let track = button(text(label).size(14))
+                .padding([10, 20])
+                .on_press_maybe(message)
+                .style(move |_, _| style::countdown_track(c, eased));
+            let fill = container(text(label).size(14))
+                .padding([10, 20])
+                .style(move |_| style::countdown_fill(c));
+            return actions
+                .push(stack![
+                    track,
+                    crate::clip_fraction::ClipFraction::new(fill, eased)
+                ])
+                .into();
+        }
+        actions
+            .push(
+                button(text(label).size(14))
+                    .padding([10, 20])
+                    .on_press_maybe(message)
+                    .style(move |_, status| style::action(c, primary, status)),
+            )
+            .into()
+    }
+
+    fn status_footer(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        let active = self.active_step();
+        let labels = self.step_labels();
+        let caption = if self.page == Page::Finished {
+            self.language.t(L::Done).to_owned()
+        } else {
+            format!(
+                "{} {} {} {} · {}",
+                self.language.t(L::Step),
+                active + 1,
+                self.language.t(L::Of),
+                labels.len(),
+                self.language.t(labels[active])
+            )
+        };
+        let mut segments = row![].spacing(5);
+        let build_stages = self.build_stages();
+        let build_start = labels.len() - build_stages.len();
+        for i in 0..labels.len() {
+            let value = if self.page == Page::Progress && i >= build_start {
+                let stage = build_stages[i - build_start].index();
+                if self.demo || self.backend_status == super::BackendStatus::Idle {
+                    (self.motion.value - stage as f32).clamp(0.0, 1.0)
+                } else if self.build_progress.stages[stage].done {
+                    1.0
+                } else if stage == self.build_progress.active.index() {
+                    (self.motion.value - stage as f32).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
+            } else if i < active || self.page == Page::Finished {
+                1.0
+            } else {
+                0.0
+            };
+            let current = i == active && self.page != Page::Finished;
+            segments = segments.push(
+                container(
+                    progress_bar(0.0..=1.0, value)
+                        .girth(6)
+                        .style(move |_| style::progress(c)),
+                )
+                .padding(3)
+                .width(iced::Length::FillPortion(
+                    if i >= build_start
+                        && build_stages[i - build_start] == crate::progress::Stage::Compile
+                    {
+                        3
+                    } else if i >= build_start
+                        && build_stages[i - build_start] == crate::progress::Stage::Generate
+                    {
+                        2
+                    } else {
+                        1
+                    },
+                ))
+                .style(move |_| container::Style {
+                    border: iced::Border {
+                        color: if current { c.accent } else { c.background },
+                        width: 1.0,
+                        radius: 6.0.into(),
+                    },
+                    ..Default::default()
+                }),
+            );
+        }
+        // The three actions wrap to a second line when a translation is too long for the window width.
+        let mut controls = row![self.text_action(
+            self.language.t(if self.details {
+                L::HideDetails
+            } else {
+                L::Details
+            }),
+            Message::ToggleDetails
+        )]
+        .spacing(18);
+        if self.details {
+            controls = controls
+                .push(self.text_action(self.language.t(L::OpenLogFolder), Message::OpenLogFolder))
+                .push(self.text_action(self.language.t(L::CopyLog), Message::CopyLog))
+                .push(self.text_action(self.language.t(L::ExportSave), Message::ExportSave));
+        }
+        let controls = controls.wrap().vertical_spacing(2);
+        let mut footer = column![].spacing(10);
+        if self.page != Page::Finished {
+            footer = footer.push(self.navigation());
+        }
+        footer = footer
+            .push(text(caption).size(11).color(c.muted))
+            .push(segments)
+            .push(controls);
+        footer.into()
+    }
+
+    fn finished_view(&self) -> Element<'_, Message> {
+        let c = style::colors(self.appearance);
+        column![
+            text(self.language.t(L::FinishedTitle)).size(25),
+            text(self.language.t(L::FinishedHint))
+                .size(14)
+                .color(c.muted),
+            self.action(self.language.t(L::ToSelection), Some(Message::Back), true),
+        ]
+        .spacing(24)
+        .into()
+    }
+
+    fn summary<'a>(&self, label: &'a str, value: String) -> Element<'a, Message> {
+        let c = style::colors(self.appearance);
+        row![
+            text(label).size(12).color(c.muted).width(82),
+            text(compact_name(&value)).size(13).width(Fill)
+        ]
+        .spacing(12)
+        .into()
+    }
+
+    fn file_action<'a>(
+        &self,
+        label: &'a str,
+        message: Option<Message>,
+        primary: bool,
+    ) -> Element<'a, Message> {
+        let c = style::colors(self.appearance);
+        button(text(label).size(12).width(Fill).align_x(Center))
+            .width(FILE_ACTION_WIDTH)
+            .padding([8, 12])
+            .on_press_maybe(message)
+            .style(move |_, status| style::action(c, primary, status))
+            .into()
+    }
+
+    fn action<'a>(
+        &self,
+        label: &'a str,
+        message: Option<Message>,
+        primary: bool,
+    ) -> Element<'a, Message> {
+        let c = style::colors(self.appearance);
+        button(text(label).size(12))
+            .padding([8, 12])
+            .on_press_maybe(message)
+            .style(move |_, status| style::action(c, primary, status))
+            .into()
+    }
+
+    /// A Windows folder setting: its name, the current folder (or the default) and the choose and reset actions.
+    fn folder_setting<'a>(
+        &'a self,
+        label: &'a str,
+        hint: &'a str,
+        folder: &'a Option<PathBuf>,
+        setting: FolderSetting,
+    ) -> Element<'a, Message> {
+        let c = style::colors(self.appearance);
+        let shown = folder.as_ref().map_or_else(
+            || self.language.t(L::FolderDefault).to_string(),
+            |path| path.display().to_string(),
+        );
+        let reset = if folder.is_some() {
+            self.text_action(
+                self.language.t(L::FolderReset),
+                Message::ResetFolder(setting),
+            )
+        } else {
+            space().height(0).into()
+        };
+        column![
+            text(label).size(14),
+            text(shown).size(12),
+            row![
+                self.text_action(self.language.t(L::Folder), Message::ChooseFolder(setting)),
+                reset
+            ]
+            .spacing(14),
+            text(hint).size(12).color(c.muted),
+        ]
+        .spacing(5)
+        .into()
+    }
+
+    fn text_action<'a>(&self, label: &'a str, message: Message) -> Element<'a, Message> {
+        let c = style::colors(self.appearance);
+        button(text(label).size(12))
+            .padding([3, 0])
+            .on_press(message)
+            .style(move |_, status| iced::widget::button::Style {
+                text_color: if status == iced::widget::button::Status::Hovered {
+                    c.text
+                } else {
+                    c.muted
+                },
+                ..Default::default()
+            })
+            .into()
+    }
+}

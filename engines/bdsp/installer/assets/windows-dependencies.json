@@ -1,0 +1,192 @@
+{
+  "schema": 1,
+  "minimum_windows_build": 19045,
+  "minimum_free_gb": 40,
+  "abi": "llvm-mingw-ucrt",
+  "simd": "c",
+  "profiles": {
+    "x86_64": {
+      "triple": "x86_64-w64-windows-gnu",
+      "machine": 34404,
+      "cpu_flags": [
+        "-march=x86-64",
+        "-mcx16"
+      ],
+      "accepted": false
+    },
+    "aarch64": {
+      "triple": "aarch64-w64-windows-gnu",
+      "machine": 43620,
+      "cpu_flags": [
+        "-march=armv8-a"
+      ],
+      "accepted": false
+    }
+  },
+  "private_runtime": {
+    "manifest": "installer/runtime/manifest.json",
+    "wheels": "installer/runtime/wheels.lock.json",
+    "generator_engine": "unicorn==2.1.4",
+    "target": "host",
+    "arm64_unicorn_qualified": false
+  },
+  "components": [
+    {
+      "id": "qt",
+      "source": "https://www.qt.io/download-qt-installer-oss",
+      "license": "LicenseRef-Qt-module-and-plugin-audit-required",
+      "qualification": "Qt (LGPL): module and plugin license audit and a source offer are required before redistribution.",
+      "version": null,
+      "artifacts": []
+    },
+    {
+      "id": "llvm-mingw",
+      "source": "https://github.com/mstorsjo/llvm-mingw",
+      "license": "LicenseRef-LLVM-MinGW-distribution",
+      "qualification": "Mixed licenses (GPL tools included): keep every notice of the toolchain distribution.",
+      "version": null,
+      "artifacts": []
+    },
+    {
+      "id": "unicorn-msvc-runtime",
+      "source": "https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist",
+      "license": "LicenseRef-Microsoft-Visual-Cpp-Runtime",
+      "qualification": "vcruntime140.dll is deployed app-local from the Visual Studio redistributable; follow Microsoft's redistribution terms.",
+      "version": null,
+      "artifacts": []
+    },
+    {
+      "id": "SDL3",
+      "source": "https://github.com/libsdl-org/SDL",
+      "license": "Zlib",
+      "qualification": "Zlib: keep the license text.",
+      "version": null,
+      "source_archive": {},
+      "build_recipe": {
+        "status": "implemented-offline",
+        "system": "maintainer-only CMake with an explicit existing Ninja executable",
+        "compiler": "Explicit target LLVM-MinGW UCRT C/C++/RC compilers; no host autodetection.",
+        "definitions": {
+          "SDL_SHARED": "ON",
+          "SDL_STATIC": "OFF",
+          "SDL_TESTS": "OFF",
+          "SDL_TEST_LIBRARY": "OFF",
+          "SDL_EXAMPLES": "OFF",
+          "SDL_HIDAPI": "ON",
+          "SDL_HIDAPI_JOYSTICK": "ON",
+          "SDL_JOYSTICK": "ON",
+          "SDL_XINPUT": "ON",
+          "SDL_AUDIO": "ON",
+          "SDL_VIDEO": "ON",
+          "SDL_VULKAN": "ON",
+          "SDL_REVISION": "release-3.4.18",
+          "CMAKE_DISABLE_FIND_PACKAGE_Git": "TRUE",
+          "FETCHCONTENT_FULLY_DISCONNECTED": "ON"
+        },
+        "required_inventory": [
+          "include/SDL3/SDL.h",
+          "include/SDL3/SDL_version.h",
+          "Generated SDL_build_config.h captured with the configuration receipt",
+          "lib/libSDL3.dll.a",
+          "bin/SDL3.dll",
+          "LICENSE.txt",
+          "All installed files with SHA256 and tool/source/target/configuration receipts",
+          "PE normal/delay imports plus audited dynamically loaded Windows system modules"
+        ]
+      },
+      "artifacts": []
+    },
+    {
+      "id": "vulkan",
+      "source": "https://github.com/KhronosGroup/Vulkan-Headers",
+      "license": "Apache-2.0 AND MIT",
+      "qualification": "Apache-2.0 and MIT: keep the notices.",
+      "build_recipe": {
+        "status": "implemented-offline",
+        "script": "scripts/recomp/dependency_build.py",
+        "component": "vulkan",
+        "source_lock": "installer/assets/windows-sources.json",
+        "sources": [
+          "vulkan-headers",
+          "vma",
+          "shaderc",
+          "glslang",
+          "spirv-headers",
+          "spirv-tools"
+        ],
+        "required_inventory": [
+          "include/vulkan/vulkan.h",
+          "include/vk_mem_alloc.h",
+          "include/shaderc/shaderc.h",
+          "lib/libvulkan-1.a (registry-derived import references only; no loader DLL)",
+          "lib/libshaderc_shared.dll.a",
+          "bin/libshaderc_shared.dll and measured target C++ runtime DLL closure",
+          "Source notices, configuration, compiler/tool/patch hashes and per-file SHA256"
+        ]
+      },
+      "version": null,
+      "artifacts": []
+    },
+    {
+      "id": "ffmpeg",
+      "source": "https://ffmpeg.org",
+      "license": "LicenseRef-FFmpeg-build-configuration",
+      "qualification": "LGPL shared build (BtbN): provide the build configuration and a source offer.",
+      "version": null,
+      "build_recipe": {
+        "status": "implemented-offline-import",
+        "script": "scripts/recomp/dependency_build.py",
+        "component": "ffmpeg",
+        "producer": "BtbN/FFmpeg-Builds",
+        "producer_packaging_reference": "https://github.com/BtbN/FFmpeg-Builds/blob/b4a2b1d7cc241786eb8e2b588a7ade40cad48bbd/variants/windows-install-shared.sh",
+        "producer_recipe_matched": false,
+        "license_expected": "LGPL version 3 or later",
+        "redistribution_qualified": false,
+        "required_inventory": [
+          "include/libavcodec/avcodec.h",
+          "include/libavformat/avformat.h",
+          "include/libavutil/avutil.h",
+          "lib/libavcodec.dll.a",
+          "lib/libavformat.dll.a",
+          "lib/libavutil.dll.a",
+          "bin/avcodec-62.dll",
+          "bin/avformat-62.dll",
+          "bin/avutil-60.dll",
+          "Measured recursive runtime DLL closure",
+          "Original LICENSE.txt and documentation; configure/license/codec probe receipt"
+        ]
+      },
+      "artifacts": [
+        {
+          "target": "x86_64",
+          "abi": "mingw-ucrt-c-api",
+          "minimum_windows_build": 19045,
+          "minimum_windows_evidence": "https://github.com/BtbN/FFmpeg-Builds#readme",
+          "qualified": false
+        }
+      ]
+    },
+    {
+      "id": "hactool",
+      "source": "https://github.com/SciresM/hactool",
+      "license": "ISC AND Apache-2.0 AND MIT AND BSD-2-Clause AND LicenseRef-Unicode-ConvertUTF",
+      "qualification": "ISC with bundled mbedTLS (Apache-2.0) and further notices: keep them.",
+      "version": null,
+      "build_recipe": {
+        "status": "implemented-offline",
+        "script": "scripts/recomp/dependency_build.py",
+        "component": "hactool",
+        "sources": "installer/assets/windows-sources.json: hactool, including bundled mbedTLS crypto",
+        "system": "Direct C17 LLVM-MinGW compile/link; upstream source lists are parsed, never run through Make.",
+        "adaptations": "Hashed Unicode argv/fopen boundary and bounded extracted-path patches in temporary upstream sources.",
+        "inventory": "Source/compiler/patch receipts, executable/import closure and bundled third-party notices."
+      },
+      "artifacts": []
+    }
+  ],
+  "release_blockers": [
+    "Redistribution review of the bundled third-party binaries (notices, source offers) is not finished.",
+    "Windows 10 22H2, Windows 11 and the controller matrix need real-hardware acceptance.",
+    "ARM64 is experimental and not qualified."
+  ]
+}

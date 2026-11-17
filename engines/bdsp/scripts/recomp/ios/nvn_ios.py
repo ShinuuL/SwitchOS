@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""Generates the iOS counterpart metal_ios.m from metal.m: AppKit replaced by UIKit, the SDL window part
+(from the marker "UI thread") by scripts/recomp/ios/ui_ios.inc. Usage: nvn_ios.py <nvn-src-a>"""
+import os
+import sys
+
+root = sys.argv[1]
+here = os.path.dirname(os.path.abspath(__file__))
+s = open(os.path.join(root, "nvn/metal.m"), encoding="utf-8").read()
+marker = "// ================================================================== UI thread"
+if marker not in s:
+    sys.exit("metal.m: marker 'UI thread' missing")
+s = s[: s.index(marker)]
+if "#import <AppKit/AppKit.h>" not in s:
+    sys.exit("metal.m: AppKit import missing")
+s = s.replace("#import <AppKit/AppKit.h>", "#import <UIKit/UIKit.h>")
+s += open(os.path.join(here, "ui_ios.inc"), encoding="utf-8").read()
+open(os.path.join(root, "nvn/metal_ios.m"), "w", encoding="utf-8").write(s)
+
+# renderer.m: Depth24Unorm_Stencil8 does not exist on iOS (Nvidia formats are mapped to Depth32Float_Stencil8 there anyway)
+r = open(os.path.join(root, "nvn/renderer.m"), encoding="utf-8").read()
+r = r.replace(" || s.pixelFormat == MTLPixelFormatDepth24Unorm_Stencil8", "")
+if "Depth24Unorm_Stencil8" in r:
+    sys.exit("renderer.m: further Depth24Unorm_Stencil8 spot, extend the rule")
+open(os.path.join(root, "nvn/renderer_ios.m"), "w", encoding="utf-8").write(r)
+print("metal_ios.m, renderer_ios.m geschrieben")

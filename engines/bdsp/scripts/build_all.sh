@@ -1,0 +1,484 @@
+#!/usr/bin/env bash
+# Entry point of the build pipeline (guide: docs/BUILD.md).
+# The repo never contains game data or keys.
+#
+# Stages (fixed order): tools extract recomp
+#   A preflight runs first (check only, no installation).
+#
+# Usage (everything in one command):
+#   scripts/build_all.sh all --xci <x.xci> --nsp <update.nsp> --keys <folder> [--target macos|ios|all]
+#   scripts/build_all.sh --dry-run all --xci ... --keys ...     shows plan and commands, changes nothing
+#   scripts/build_all.sh --from extract --to recomp            only a range of the order
+#   scripts/build_all.sh --only tools,extract                   exactly these stages
+#   scripts/build_all.sh preflight                              only check the prerequisites
+# Inputs (extract only): --xci FILE | --base-nsp FILE | --base-nca-dir FOLDER, --nsp FILE (optional update),
+#   --keys FOLDER | --prod-keys FILE [--title-keys FILE]
+# Control:
+#   --work FOLDER       working folder (default: work/, gitignored)
+#   --target T          macos, ios or all (default: all) for recomp
+#   --dry-run           run nothing, only show plan, marker status and commands
+#   --from S / --to S   range of the stage order;  --only S[,S]  exactly these stages
+#   --force             regenerate the selected stages even if the marker matches
+#   --no-preflight      skip the preflight;  --min-free-gb N  minimum free space in the preflight (default 40)
+#   --keep-nca          keep the unpacked NCAs (several GB)
+#   Stage recomp (macOS app from the recompilation, work/builds/macos-recomp/BDSP.app; only for --target macos|all):
+#   --recomp-jobs N     override CPU/RAM-based compiler count;  --recomp-o0-kb N  outliers from N KB compiled with -O0 (default 300)
+#   --hardened          sign the app with the hardened runtime (default: ad hoc only);  --no-install-data  do not clone the RomFS to Application Support
+# Environment: TOOLS_DIR, MIN_FREE_GB (reserve in extract, default 25), DEVELOPER_DIR
+#
+# Exit codes: 0 ok, 2 usage, 3 input missing, 4 tool missing/build, 5 hactool error,
+#   6 key/titlekey, 7 NCA not found, 8 not enough space, 9 check, 10 prerequisite/stage missing
+# hactool prints key values: stdout/stderr never go into the log (only filtered fields).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+STAGEPY="$ROOT/scripts/build_stages.py"
+TOOLS_DIR="${TOOLS_DIR:-$ROOT/tools}"
+HACTOOL_DIR="$TOOLS_DIR/hactool"
+HACTOOL="$HACTOOL_DIR/hactool"
+HACTOOL_REPO="https://github.com/SciresM/hactool"
+GIT_BIN="${BDSP_GIT:-git}"
+export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+MIN_FREE_GB="${MIN_FREE_GB:-25}"
+PREFLIGHT_FREE_GB="${PREFLIGHT_MIN_FREE_GB:-40}"
+ALL_STAGES="tools extract recomp"
+
+XCI="" BASE_NSP="" BASE_NCA_DIR="" NSP="" KEYS_DIR="" PROD_KEYS="" TITLE_KEYS="" WORK="$ROOT/work"
+FORCE=0 KEEP_NCA=0 STAGES="" FROM="" TO="" ONLY=""
+DRY=0 NO_PREFLIGHT=0 PREFLIGHT_ONLY=0 TARGET=all
+RECOMP_JOBS=auto RECOMP_O0_KB=300 RECOMP_HARDENED=0 RECOMP_DATA=1
+SELECTED="" RESULTS="" UPSTREAM_DIRTY=0
+
+log() { echo "[$(date +%H:%M:%S)] $*"; }
+die() { local code="$1"; shift; echo "ERROR: $*" >&2; exit "$code"; }
+usage() { awk 'NR > 1 && /^set -euo/ {exit} NR > 1 {sub(/^# ?/, ""); print}' "$0"; }
+
+# ---------- Stage tools ----------
+ok() { echo "  OK     $*"; }
+miss() { echo "  MISSING  $*"; }
+
+hactool_runs() {
+  local out
+  [ -x "$HACTOOL" ] || return 1
+  out="$("$HACTOOL" --help 2>&1 || true)"
+  case "$out" in *Usage*) return 0 ;; *) return 1 ;; esac
+}
+
+# A hactool on PATH (distribution package, /usr/bin) is used instead of cloning and building one: it must print its usage
+# and know every option the extract tool passes. tools/hactool/hactool becomes a link to it, so every stage and the
+# installer find it at the same place.
+system_hactool() {
+  local found out option
+  found="$(command -v hactool 2>/dev/null)" || return 1
+  [ -x "$found" ] && [ "$found" != "$HACTOOL" ] || return 1
+  out="$("$found" --help 2>&1 || true)"
+  case "$out" in *Usage*) ;; *) return 1 ;; esac
+  for option in --securedir --pfs0dir --section0dir --romfsdir --exefsdir --basenca --disablekeywarns --suppresskeys; do
+    case "$out" in *"$option"*) ;; *) return 1 ;; esac
+  done
+  echo "$found"
+}
+
+link_system_hactool() {
+  local found
+  found="$(system_hactool)" || return 1
+  if [ -e "$HACTOOL_DIR" ] && [ -n "$(ls -A "$HACTOOL_DIR")" ]; then return 1; fi
+  mkdir -p "$HACTOOL_DIR" && ln -s "$found" "$HACTOOL" && hactool_runs || return 1
+  ok "hactool found on PATH ($found), nothing to download or build"
+}
+
+# Upstream hactool copies overlapping buffers with memcpy while it prepares the update (BKTR) tables. glibc on aarch64 breaks that
+# (extraction stops with "Failed to read from Base NCA RomFS"), macOS and x86 glibc happen to work. The patch is two memmove calls.
+apply_hactool_patch() {
+  local patch="$ROOT/scripts/hactool-bktr-memmove.patch"
+  [ -f "$patch" ] && [ -e "$HACTOOL_DIR/.git" ] || return 0
+  if "$GIT_BIN" -C "$HACTOOL_DIR" apply --reverse --check "$patch" >/dev/null 2>&1; then return 0; fi
+  if "$GIT_BIN" -C "$HACTOOL_DIR" apply --check "$patch" >/dev/null 2>&1; then
+    "$GIT_BIN" -C "$HACTOOL_DIR" apply "$patch" && log "hactool: applied scripts/hactool-bktr-memmove.patch (memmove for overlapping BKTR tables)"
+  else
+    log "hactool: the memmove patch does not apply to this hactool source; building it unchanged"
+  fi
+}
+
+# An hactool built earlier from the unpatched source is rebuilt once on Linux aarch64, where it fails on every update NCA.
+hactool_needs_patch() {
+  [ "$(uname -s)-$(uname -m)" = "Linux-aarch64" ] && [ -f "$ROOT/scripts/hactool-bktr-memmove.patch" ] && [ -e "$HACTOOL_DIR/.git" ] &&
+    "$GIT_BIN" -C "$HACTOOL_DIR" apply --check "$ROOT/scripts/hactool-bktr-memmove.patch" >/dev/null 2>&1
+}
+
+check_hactool() {
+  if hactool_runs && ! hactool_needs_patch; then ok "hactool ($HACTOOL)"; return 0; fi
+  # A link to a system hactool that has since disappeared must not block the build below.
+  if [ -L "$HACTOOL" ]; then rm -f "$HACTOOL"; fi
+  if link_system_hactool; then return 0; fi
+  local c
+  for c in "$GIT_BIN" make cc; do
+    command -v "$c" >/dev/null 2>&1 || { miss "hactool: '$c' missing (Xcode Command Line Tools?)"; return 1; }
+  done
+  if [ ! -f "$HACTOOL_DIR/Makefile" ]; then
+    if [ -e "$HACTOOL_DIR" ] && [ -n "$(ls -A "$HACTOOL_DIR")" ]; then
+      miss "hactool: $HACTOOL_DIR is not a hactool source folder"; return 1
+    fi
+    log "hactool: cloning $HACTOOL_REPO with $GIT_BIN"
+    mkdir -p "$TOOLS_DIR"
+    GIT_TERMINAL_PROMPT=0 "$GIT_BIN" -c credential.helper= clone --quiet --recursive "$HACTOOL_REPO" "$HACTOOL_DIR" >"$TOOLS_DIR/hactool-clone.log" 2>&1 || { tail -n 8 "$TOOLS_DIR/hactool-clone.log" >&2; miss "hactool: tool-source download failed (log: $TOOLS_DIR/hactool-clone.log)"; return 1; }
+  elif [ ! -f "$HACTOOL_DIR/mbedtls/Makefile" ] && [ -e "$HACTOOL_DIR/.git" ]; then
+    GIT_TERMINAL_PROMPT=0 "$GIT_BIN" -c credential.helper= -C "$HACTOOL_DIR" submodule update --init --recursive >/dev/null 2>&1 || { miss "hactool: submodule mbedtls missing"; return 1; }
+  fi
+  [ -f "$HACTOOL_DIR/config.mk" ] || cp "$HACTOOL_DIR/config.mk.template" "$HACTOOL_DIR/config.mk"
+  apply_hactool_patch
+  log "hactool: building (make, log: $HACTOOL_DIR/build.log)"
+  if ! make -C "$HACTOOL_DIR" -j "$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)" >"$HACTOOL_DIR/build.log" 2>&1; then
+    tail -n 15 "$HACTOOL_DIR/build.log" >&2
+    miss "hactool: make failed"
+    return 1
+  fi
+  hactool_runs || { miss "hactool: binary does not run"; return 1; }
+  ok "hactool built ($HACTOOL)"
+}
+
+check_extract_tool() {
+  if [ -n "${BDSP_EXTRACT:-}" ]; then ok "extract tool (installer: $BDSP_EXTRACT ${BDSP_EXTRACT_PREFIX:-})"; return 0; fi
+  command -v cargo >/dev/null 2>&1 || { miss "extract tool: cargo missing (install Rust from https://rustup.rs, or use the installer app)"; return 1; }
+  log "extract tool: cargo build --release (installer/extract)"
+  cargo build --release --locked --manifest-path "$ROOT/installer/extract/Cargo.toml" >"$TOOLS_DIR/extract-build.log" 2>&1 \
+    || { tail -n 15 "$TOOLS_DIR/extract-build.log" >&2; miss "extract tool: build failed"; return 1; }
+  ok "extract tool built ($ROOT/installer/extract/target/release/bdsp-extract)"
+}
+
+check_ffmpeg() {
+  if command -v ffmpeg >/dev/null 2>&1; then
+    ok "ffmpeg ($(ffmpeg -version 2>&1 | sed -n '1s/ Copyright.*//p'))"
+  else
+    miss "ffmpeg (brew install ffmpeg)"; return 1
+  fi
+}
+
+check_xcode() {
+  local v
+  [ -d /Applications/Xcode.app ] || { miss "Xcode at /Applications/Xcode.app"; return 1; }
+  [ -d "$DEVELOPER_DIR" ] || { miss "DEVELOPER_DIR=$DEVELOPER_DIR does not exist"; return 1; }
+  v="$(xcodebuild -version 2>/dev/null | sed -n '1,2p' | tr '\n' ' ')" || true
+  [ -n "$v" ] || { miss "Xcode: xcodebuild does not run (license accepted? 'xcodebuild -license')"; return 1; }
+  ok "Xcode ($v, DEVELOPER_DIR=$DEVELOPER_DIR)"
+}
+
+check_python() {
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))'; then
+    ok "python3 ($(python3 --version 2>&1))"
+  else
+    miss "python3 >= 3.9"; return 1
+  fi
+}
+
+stage_tools() {
+  log "Stage tools"
+  if [ "$DRY" -eq 1 ]; then
+    if hactool_runs; then ok "hactool present ($HACTOOL)"
+    elif found="$(system_hactool)"; then ok "hactool found on PATH ($found), would be used without a download"
+    else echo "    [dry-run] would clone and build hactool: $HACTOOL_REPO to $HACTOOL_DIR (make, without sudo)"; fi
+    echo "    [dry-run] would build the extract tool (cargo) and check python3, ffmpeg and Xcode (check only)"
+    stage_result tools "plan"; return 0
+  fi
+  local bad=0
+  check_python || bad=1
+  check_hactool || bad=1
+  mkdir -p "$TOOLS_DIR"
+  check_extract_tool || bad=1
+  # ffmpeg and Xcode are needed for the macOS stages only (the Linux build uses its own scripts, docs/BUILD.md section 6)
+  if [ "$(uname -s)" = Darwin ]; then check_ffmpeg || bad=1; check_xcode || bad=1; fi
+  [ "$bad" -eq 0 ] || die 4 "Tools incomplete (see MISSING above)"
+  log "Stage tools done"
+  stage_result tools "executed"
+}
+
+# ---------- Stage extract ----------
+abspath() { local d; d="$(cd "$(dirname "$1")" && pwd)" && echo "$d/$(basename "$1")"; }
+file_size() { wc -c < "$1" | tr -d ' '; }   # (portable: stat -f %z is BSD only)
+free_gb() { df -k "$1" | awk 'NR==2 {print int($4 * 1024 / 1000000000)}'; }
+
+# The extract step is a Rust program (installer/extract). The installer app passes itself as BDSP_EXTRACT (+ --cli),
+# a source checkout uses the binary that the tools stage builds.
+EXTRACT_CMD=()
+locate_extract() {
+  if [ -n "${BDSP_EXTRACT:-}" ]; then EXTRACT_CMD=("$BDSP_EXTRACT" ${BDSP_EXTRACT_PREFIX:+"$BDSP_EXTRACT_PREFIX"}); return 0; fi
+  EXTRACT_CMD=("$ROOT/installer/extract/target/release/bdsp-extract")
+  [ -x "${EXTRACT_CMD[0]}" ]
+}
+
+extract_args() {
+  EXTRACT_ARGS=(--base "$1" --keys "$PROD_KEYS" --hactool "$HACTOOL" --work "$WORK" --icons "$WORK/recomp/icons/source")
+  [ -z "$NSP" ] || EXTRACT_ARGS+=(--update "$NSP")
+  [ -z "$TITLE_KEYS" ] || EXTRACT_ARGS+=(--title-keys "$TITLE_KEYS")
+}
+
+stage_extract() {
+  log "Stage extract"
+  if [ -z "$XCI$BASE_NSP$BASE_NCA_DIR" ] && [ "$FORCE" -eq 0 ] && [ -s "$WORK/manifest.json" ] && [ -s "$WORK/exefs/main" ] && [ -d "$WORK/romfs" ]; then
+    log "extract: no base source given, using the existing result in $WORK"
+    stage_result extract "present"; return 0
+  fi
+  local base_kind base_path base_size
+  if [ -n "$XCI" ]; then base_kind=xci; base_path="$XCI"
+  elif [ -n "$BASE_NSP" ]; then base_kind=nsp; base_path="$BASE_NSP"
+  elif [ -n "$BASE_NCA_DIR" ]; then base_kind=nca; base_path="$BASE_NCA_DIR"
+  else die 2 "Base game missing: use --xci, --base-nsp or --base-nca-dir"; fi
+  if [ "$base_kind" = nca ]; then [ -d "$base_path" ] || die 3 "NCA folder not found: $base_path"
+  else [ -f "$base_path" ] || die 3 "Base game not found: $base_path"; fi
+  [ -z "$NSP" ] || [ -f "$NSP" ] || die 3 "NSP not found: $NSP"
+  if [ -n "$KEYS_DIR" ]; then
+    [ -n "$PROD_KEYS" ] || PROD_KEYS="$KEYS_DIR/prod.keys"
+    [ -n "$TITLE_KEYS" ] || TITLE_KEYS="$KEYS_DIR/title.keys"
+  fi
+  [ -n "$PROD_KEYS" ] || die 2 "--keys <folder> or --prod-keys <file> missing"
+  [ -f "$PROD_KEYS" ] || die 3 "prod.keys not found: $PROD_KEYS"
+  [ -z "$TITLE_KEYS" ] || [ -f "$TITLE_KEYS" ] || TITLE_KEYS=""
+  PROD_KEYS="$(abspath "$PROD_KEYS")"
+  [ -z "$TITLE_KEYS" ] || TITLE_KEYS="$(abspath "$TITLE_KEYS")"
+  base_path="$(abspath "$base_path")"
+  [ -z "$NSP" ] || NSP="$(abspath "$NSP")"
+  if [ "$base_kind" = nca ]; then base_size=$(( $(du -sk "$base_path" | awk '{print $1}') * 1024 ))
+  else base_size="$(file_size "$base_path")"; fi
+
+  if [ "$DRY" -eq 1 ]; then
+    extract_args "$base_path"
+    if [ "$FORCE" -eq 0 ] && [ -d "$WORK" ] && locate_extract && "${EXTRACT_CMD[@]}" check "${EXTRACT_ARGS[@]}"; then
+      echo "    [dry-run] manifest.json matches: would be skipped"
+      stage_result extract "skipped (plan)"
+    else
+      echo "    [dry-run] would extract $base_kind: classify NCAs, apply update -> $WORK/exefs, $WORK/romfs (keys are never printed)"
+      UPSTREAM_DIRTY=1; stage_result extract "would run"
+    fi
+    return 0
+  fi
+  hactool_runs || link_system_hactool >/dev/null || die 4 "hactool missing: run 'scripts/build_all.sh tools' first"
+
+  mkdir -p "$WORK"
+  WORK="$(cd "$WORK" && pwd)"
+  if [ "$base_kind" = nca ]; then
+    case "$base_path/" in
+      "$WORK/nca-base/"*|"$WORK/nca-update/"*|"$WORK/.stage/"*)
+        die 3 "The selected NCA folder is inside a temporary extraction folder; choose your original folder instead" ;;
+    esac
+  fi
+  locate_extract || die 4 "The extract tool is missing: run 'scripts/build_all.sh tools' first"
+  local xci_size nsp_size=0 t0=$SECONDS rc=0
+  xci_size="$base_size"
+  [ -z "$NSP" ] || nsp_size="$(file_size "$NSP")"
+  extract_args "$base_path"
+  if [ "$FORCE" -eq 0 ] && "${EXTRACT_CMD[@]}" check "${EXTRACT_ARGS[@]}"; then
+    log "extract: manifest.json matches, skipped (--force to regenerate)"
+    stage_result extract "skipped"
+    return 0
+  fi
+  # The check above already found the result stale: --force spares the extract step hashing the inputs a second time.
+  EXTRACT_ARGS+=(--force)
+  [ "$KEEP_NCA" -eq 0 ] || EXTRACT_ARGS+=(--keep-nca)
+  mkdir -p "$WORK/recomp/icons"
+
+  # Space needed: XCI + NSP + RomFS (roughly as large as the XCI) plus reserve
+  local need free
+  need=$(( MIN_FREE_GB + (xci_size * 2 + nsp_size + 999999999) / 1000000000 + 1 ))
+  free="$(free_gb "$WORK")"
+  [ "$free" -ge "$need" ] || die 8 "Not enough space: ${free} GB free, about ${need} GB needed (incl. ${MIN_FREE_GB} GB reserve)"
+
+  "${EXTRACT_CMD[@]}" extract "${EXTRACT_ARGS[@]}" || rc=$?
+  [ "$rc" -eq 0 ] || die "$rc" "Extraction failed (see the message above)"
+  log "Stage extract done in $((SECONDS - t0)) s: $WORK/exefs, $WORK/romfs, $WORK/manifest.json"
+  stage_result extract "executed"
+}
+
+# ---------- Shared helpers of the further stages ----------
+stage_result() { RESULTS="$RESULTS$1|$2"$'\n'; }
+human() { awk -v b="$1" 'BEGIN { printf "%.1f GB", b / 1000000000 }'; }
+sp() { python3 "$STAGEPY" "$@"; }
+want_target() { [ "$TARGET" = all ] || [ "$TARGET" = "$1" ]; }
+
+# Run a command, output to work/logs/<stage>.log; with --dry-run only show it.
+logrun() {
+  local st="$1" rc=0; shift
+  if [ "$DRY" -eq 1 ]; then
+    printf '    [dry-run]'; printf ' %q' "$@"; printf '   (log: %s)\n' "$WORK/logs/$st.log"
+    return 0
+  fi
+  mkdir -p "$WORK/logs"
+  "$@" </dev/null >"$WORK/logs/$st.log" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ] && [ "${QUIET_FAIL:-0}" -eq 0 ]; then tail -n 20 "$WORK/logs/$st.log" >&2; fi
+  return "$rc"
+}
+
+# Plan output for single commands (only with --dry-run), otherwise run them.
+run() {
+  if [ "$DRY" -eq 1 ]; then printf '    [dry-run]'; printf ' %q' "$@"; printf '\n'; return 0; fi
+  "$@"
+}
+
+# Check the marker: 0 = skip. Arguments: stage [output paths that must exist]
+stage_cached() {
+  local st="$1" p present=1; shift
+  STAGE_HASH="$(sp stage-hash --stage "$st" --root "$ROOT" --work "$WORK" --target "$TARGET" | tail -n 1)"
+  for p in "$@"; do [ -e "$p" ] || present=0; done
+  if [ "$FORCE" -eq 0 ] && [ "$present" -eq 1 ] && { [ "$DRY" -eq 0 ] || [ "$UPSTREAM_DIRTY" -eq 0 ]; } \
+     && sp marker-check --work "$WORK" --stage "$st" --hash "$STAGE_HASH"; then
+    log "$st: marker matches (inputs unchanged), skipped (--force to regenerate)"
+    stage_result "$st" "skipped (marker matches)"
+    return 0
+  fi
+  if [ "$DRY" -eq 1 ]; then UPSTREAM_DIRTY=1; echo "    [dry-run] Stage $st would run:"; fi
+  return 1
+}
+
+# Mark a stage as done (notes K=V, counts/sizes only). With --dry-run only record the result.
+stage_done() {
+  local st="$1" n args=(); shift
+  if [ "$DRY" -eq 1 ]; then stage_result "$st" "would run"; return 0; fi
+  for n in "$@"; do args+=(--note "$n"); done
+  sp marker-write --work "$WORK" --stage "$st" --hash "$STAGE_HASH" ${args[@]+"${args[@]}"}
+  stage_result "$st" "executed"
+}
+
+need_extract() {
+  [ -s "$WORK/exefs/main" ] && [ -d "$WORK/romfs/Data" ] && return 0
+  case " $SELECTED " in *" extract "*) return 0 ;; esac
+  if [ "$DRY" -eq 1 ]; then echo "    [dry-run] Note: $WORK/exefs and romfs are missing (stage extract not selected)"; return 0; fi
+  die 10 "exefs/romfs missing in $WORK: run 'scripts/build_all.sh extract --xci <file> --nsp <file> --keys <folder>' first (docs/BUILD.md)"
+}
+
+# ---------- Stage recomp ----------
+# macOS app from the recompilation of your own dump (generator -> C -> compile -> runtime/Metal -> BDSP.app); technique and
+# sub-steps: scripts/recomp/app/recomp_build.sh, guide: docs/BUILD.md, docs/recomp-macapp.md
+recomp_out() { echo "$WORK/builds/macos-recomp/BDSP.app"; }
+
+stage_recomp() {
+  log "Stage recomp (macOS app from the recompilation, Metal)"
+  if ! want_target macos; then
+    echo "  recomp: only for --target macos or all (iPadOS: scripts/recomp/ios, docs/recomp-ios.md); skipped"
+    stage_result recomp "skipped (target $TARGET)"; return 0
+  fi
+  need_extract
+  if [ "$RECOMP_JOBS" = auto ]; then RECOMP_JOBS=$(python3 "$ROOT/scripts/recomp/parallel_jobs.py"); fi
+  case "$RECOMP_JOBS$RECOMP_O0_KB" in ''|*[!0-9]*) die 2 "--recomp-jobs and --recomp-o0-kb need whole numbers" ;; esac
+  [ "$RECOMP_JOBS" -ge 1 ] || die 2 "--recomp-jobs needs a number >= 1"
+  local out; out="$(recomp_out)"
+  export XNU_RECOMP_OPTS="o0kb=$RECOMP_O0_KB hardened=$RECOMP_HARDENED data=$RECOMP_DATA"
+  stage_cached recomp "$out/Contents/MacOS/BDSP" && return 0
+  local args=(--jobs "$RECOMP_JOBS" --o0-kb "$RECOMP_O0_KB" --out "$out")
+  [ "$RECOMP_HARDENED" -eq 0 ] || args+=(--hardened)
+  [ "$RECOMP_DATA" -eq 1 ] || args+=(--no-install-data)
+  [ "$FORCE" -eq 0 ] || args+=(--force)
+  if [ "$DRY" -eq 1 ]; then
+    if [ -s "$WORK/exefs/main" ]; then
+      ensure_legacy_links
+      WORK="$WORK" "$ROOT/scripts/recomp/app/recomp_build.sh" --dry-run "${args[@]}"
+    else
+      echo "    [dry-run] would run: generator -> C (work/recomp/gen4, about 1 GB) -> compile ($RECOMP_JOBS jobs, -O0 from ${RECOMP_O0_KB} KB) -> module images -> runtime/NVN-Metal -> $out (ad hoc signed)$([ "$RECOMP_DATA" -eq 1 ] && echo ' -> RomFS into Application Support')"
+    fi
+    stage_done recomp; return 0
+  fi
+  ensure_legacy_links
+  local rc=0 t0=$SECONDS
+  WORK="$WORK" "$ROOT/scripts/recomp/app/recomp_build.sh" "${args[@]}" || rc=$?
+  [ "$rc" -eq 0 ] || die "$rc" "Stage recomp failed (messages above; logs: $WORK/logs/recomp-*.log). A rerun resumes where it stopped."
+  log "Stage recomp done in $((SECONDS - t0)) s: $out"
+  # The partial markers (recomp-gen, recomp-obj) are written now and belong to the input hash of the stage: recompute it
+  STAGE_HASH="$(sp stage-hash --stage recomp --root "$ROOT" --work "$WORK" --target "$TARGET" | tail -n 1)"
+  local sz; sz="$(sp tree-size --path "$out" | cut -d' ' -f2)"
+  stage_done recomp "app=${out#"$ROOT"/}" "bytes=$sz"
+}
+
+# ---------- Helper for non-default --work ----------
+# The helper scripts read work/romfs hard-coded; with another --work it is linked there.
+ensure_legacy_links() {
+  local n real_have real_want
+  [ "$WORK" != "$ROOT/work" ] || return 0
+  for n in romfs exefs; do
+    [ -e "$WORK/$n" ] || continue
+    if [ -L "$ROOT/work/$n" ] || [ ! -e "$ROOT/work/$n" ]; then
+      run ln -sfn "$WORK/$n" "$ROOT/work/$n"
+    else
+      real_have="$(cd "$ROOT/work/$n" && pwd -P)"; real_want="$(cd "$WORK/$n" && pwd -P)"
+      [ "$real_have" = "$real_want" ] || die 10 "$ROOT/work/$n is a real folder, but the helper scripts read it hard-coded. Either use --work work or rename the folder (mv work/$n work/$n.alt)"
+    fi
+  done
+}
+
+# ---------- Invocation ----------
+run_stage() {
+  case "$1" in
+    tools) stage_tools ;;
+    extract) stage_extract ;;
+    recomp) stage_recomp ;;
+    *) die 2 "Unknown stage: $1 (known: $ALL_STAGES)" ;;
+  esac
+}
+
+need_val() { [ "$1" -ge 2 ] || die 2 "$2 needs a value"; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --stage) need_val $# "$1"; STAGES="$STAGES ${2//,/ }"; shift 2 ;;
+    --from) need_val $# "$1"; FROM="$2"; shift 2 ;;
+    --to) need_val $# "$1"; TO="$2"; shift 2 ;;
+    --only) need_val $# "$1"; ONLY="$ONLY ${2//,/ }"; shift 2 ;;
+    --target) need_val $# "$1"; TARGET="$2"; shift 2 ;;
+    --dry-run) DRY=1; shift ;;
+    --no-preflight) NO_PREFLIGHT=1; shift ;;
+    --min-free-gb) need_val $# "$1"; PREFLIGHT_FREE_GB="$2"; shift 2 ;;
+    --xci) need_val $# "$1"; XCI="$2"; shift 2 ;;
+    --base-nsp) need_val $# "$1"; BASE_NSP="$2"; shift 2 ;;
+    --base-nca-dir) need_val $# "$1"; BASE_NCA_DIR="$2"; shift 2 ;;
+    --nsp) need_val $# "$1"; NSP="$2"; shift 2 ;;
+    --keys) need_val $# "$1"; KEYS_DIR="$2"; shift 2 ;;
+    --prod-keys) need_val $# "$1"; PROD_KEYS="$2"; shift 2 ;;
+    --title-keys) need_val $# "$1"; TITLE_KEYS="$2"; shift 2 ;;
+    --work) need_val $# "$1"; WORK="$2"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    --keep-nca) KEEP_NCA=1; shift ;;
+    --recomp-jobs) need_val $# "$1"; RECOMP_JOBS="$2"; shift 2 ;;
+    --recomp-o0-kb) need_val $# "$1"; RECOMP_O0_KB="$2"; shift 2 ;;
+    --hardened) RECOMP_HARDENED=1; shift ;;
+    --no-install-data) RECOMP_DATA=0; shift ;;
+    -*) die 2 "Unknown option: $1 (--help shows the help)" ;;
+    preflight) PREFLIGHT_ONLY=1; shift ;;
+    *) STAGES="$STAGES $1"; shift ;;
+  esac
+done
+base_sources=0
+[ -z "$XCI" ] || base_sources=$((base_sources + 1))
+[ -z "$BASE_NSP" ] || base_sources=$((base_sources + 1))
+[ -z "$BASE_NCA_DIR" ] || base_sources=$((base_sources + 1))
+[ "$base_sources" -le 1 ] || die 2 "Choose only one base source: --xci, --base-nsp or --base-nca-dir"
+case "$TARGET" in macos|ios|all) ;; *) die 2 "--target: macos, ios or all expected (not '$TARGET')" ;; esac
+case "$PREFLIGHT_FREE_GB" in ''|*[!0-9]*) die 2 "--min-free-gb needs a whole number" ;; esac
+if [ -z "${STAGES// /}" ] && [ -z "$FROM" ] && [ -z "$TO" ] && [ -z "${ONLY// /}" ] && [ "$PREFLIGHT_ONLY" -eq 0 ]; then usage; exit 2; fi
+SELECTED="$(sp stages --stage "$STAGES" ${FROM:+--from "$FROM"} ${TO:+--to "$TO"} --only "$ONLY")" || exit 2
+case "$WORK" in /*) ;; *) WORK="$PWD/$WORK" ;; esac
+[ "$DRY" -eq 1 ] || mkdir -p "$WORK"
+[ "$DRY" -eq 1 ] && [ ! -d "$WORK" ] || WORK="$(cd "$WORK" && pwd)"
+
+[ "$DRY" -eq 0 ] || log "DRY-RUN: nothing is executed, written or installed"
+log "Stages: $SELECTED (target: $TARGET, work folder: $WORK)"
+if [ "$NO_PREFLIGHT" -eq 0 ]; then
+  log "Preflight"
+  PRE_RC=0
+  sp preflight --stages "$SELECTED" --target "$TARGET" --root "$ROOT" --work "$WORK" --tools-dir "$TOOLS_DIR" \
+    --min-free-gb "$PREFLIGHT_FREE_GB" || PRE_RC=$?
+  if [ "$PRE_RC" -ne 0 ]; then
+    if [ "$DRY" -eq 1 ] && [ "$PREFLIGHT_ONLY" -eq 0 ]; then
+      echo "  (Dry-run: the real run would end here with exit code $PRE_RC; --no-preflight or --min-free-gb N works around it)"
+    else
+      echo "ERROR: preflight failed (exit code $PRE_RC); please work through the list above." >&2
+      exit "$PRE_RC"
+    fi
+  else
+    log "Preflight passed"
+  fi
+  [ "$PREFLIGHT_ONLY" -eq 0 ] || exit 0
+fi
+[ "$PREFLIGHT_ONLY" -eq 0 ] || { log "Preflight ausgeschaltet (--no-preflight)"; exit 0; }
+
+for s in $SELECTED; do run_stage "$s"; done
+
+log "Summary"
+printf '%s' "$RESULTS" | while IFS='|' read -r s r; do [ -z "$s" ] || printf '  %-12s %s\n' "$s" "$r"; done
+exit 0

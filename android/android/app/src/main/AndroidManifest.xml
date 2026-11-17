@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The game files, the ports it makes and the .NET SDK it downloads are on the shared storage. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <!-- The .NET SDK comes from Microsoft's servers. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- The game files and the ports the tool makes are on the shared storage: from Android 11 the old
+         permissions are not enough, the app needs the all-files access (the user gives it once). -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- The port runs in a foreground service (the notification keeps the process alive while the app is
+         in the background or the screen is off). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- The battery exemption: the unpack and a port are long background jobs, and the power saving kills
+         them halfway unless the app is exempt. The prompt is Android's own dialog (the onboarding's
+         battery check opens it). -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- The vibration: the gamepad's tick when a button goes down, and the game's own rumble (the host's
+         haptics thread). Without it the system's Vibrator throws and nothing moves. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- The local play over the LAN (the host's DM_LAN): the Wi-Fi state to tell a local network from a
+         mobile one, and the multicast lock, or the search broadcasts never arrive and no game finds
+         another. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <application
+        android:name=".NxApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:requestLegacyExternalStorage="true"
+        android:supportsRtl="true"
+        android:appCategory="game"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+
+        <!-- The game mode (Android 12+): the system tells the app which mode it is in (performance,
+             standard), and this app handles the performance mode itself — the host's pacing policy lets
+             the game keep its own period (upstream's #294: the mode replaces the device maker's own
+             interventions). The XML form is Android 13+; the meta-data is the Android 12 one. -->
+        <meta-data
+            android:name="android.game_mode_config"
+            android:resource="@xml/game_mode_config" />
+        <meta-data
+            android:name="com.android.app.gamemode.performance.enabled"
+            android:value="true" />
+
+        <!-- The shell: the library, the builds and the settings — and the root of the app's own task.
+             singleTop, not standard: a home-screen shortcut's intent lands in onNewIntent when the library
+             is at the front, instead of stacking a second library page. (singleTask would finish the game
+             page above it whenever the launcher icon brought the task forward — that mode belongs to the
+             game page, which is a page of this same task.) -->
+        <activity
+            android:name=".MainActivity"
+            android:launchMode="singleTop"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|orientation|screenLayout|uiMode|screenSize|smallestScreenSize|density|layoutDirection|colorMode|fontWeightAdjustment|fontScale"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The port: a foreground service so it goes on while the app is in the background or the screen
+             is off. It carries no state (PortState is the one source); it keeps the process alive and
+             mirrors the progress into the notification. -->
+        <service
+            android:name=".PortService"
+            android:exported="false" />
+
+        <!-- The player: one game at a time, in a process of its own — a crash (or the game's own exit, which
+             ends the process) takes the game down, not the app or a port that is running.
+             游戏是独立进程 + 全系统单实例（singleTask、与库页同一个任务）：退出或崩溃后露出底下的库页，
+             最近任务里仍是单卡。所有启动 intent 都路由到这一个实例（onNewIntent）；配置变化都在本页处理
+             （重建的页面接管在跑的游戏的窗口，不重启游戏）。 -->
+        <activity
+            android:name=".game.GameActivity"
+            android:process=":play"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|orientation|screenLayout|uiMode|screenSize|smallestScreenSize|density|layoutDirection|colorMode|fontWeightAdjustment|fontScale"
+            android:exported="false"
+            android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen" />
+
+        <!-- The Wireless debugging pairing code typed into the child-process limit fix's
+             notification (data/PhantomFix.kt). -->
+        <receiver android:name=".data.PhantomFixReceiver" android:exported="false" />
+
+        <!-- The save packages the panel shares: the system share sheet reads them through this provider (a
+             file:// URI is refused by Android since 7). It hands out the download folder's nx2android/ and
+             the app's own external files folder, and nothing else. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- The app's own folders (the runtime, the tools, the hosts, the saves, the logs) as a document
+             provider: they show up as one root in the system picker and in the file managers that speak
+             SAF, so the player can look at them and fix them without a computer. The permission is the
+             system's own (only the system file manager binds it directly; any other app needs the
+             player's own permission in the picker), the same shape AOSP's file system provider uses. -->
+        <provider
+            android:name="com.nx.android.app.provider.NxFilesProvider"
+            android:authorities="${applicationId}.documents"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+
+    </application>
+</manifest>

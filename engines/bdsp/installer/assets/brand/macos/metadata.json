@@ -1,0 +1,10 @@
+{
+  "source_sha256": "72e03bc67798bdc6ecc04449ede8faf618ba4b8e743a9e1eedc60bfba38bbf6a",
+  "xcode": "Xcode 27.1\nBuild version 27A9275",
+  "minimum_catalog_target": "13.0",
+  "classic_fallback_target": "12.0",
+  "files": {
+    "Installer.icns": "1b4766c13209825bfae717392138f92c4ee4389cf622eec336516724d06f0d69",
+    "Assets.car": "68f2305337537f2bd12506f4f861341f1c1fb97aa0f70025aa8838979bf92a86"
+  }
+}

@@ -1,0 +1,221 @@
+"""Windows target contract and PE dependency inspection. Standard library only."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import struct
+import subprocess
+
+ROOT = Path(__file__).resolve().parents[2]
+CONTRACT = Path(os.environ.get("BDSP_WINDOWS_CONTRACT") or ROOT / "installer" / "assets" / "windows-dependencies.json")
+
+
+def architecture(value=None):
+    value = (value or platform.machine()).lower()
+    if value in ("amd64", "x86_64"):
+        return "x86_64"
+    if value in ("arm64", "aarch64"):
+        return "aarch64"
+    raise ValueError("Windows requires an amd64 or ARM64 host/target")
+
+
+def contract(path=CONTRACT):
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if data.get("schema") != 1 or data.get("abi") != "llvm-mingw-ucrt":
+        raise ValueError("Unsupported Windows dependency contract")
+    return data
+
+
+def profile(target=None, host=None):
+    data = contract()
+    host, target = architecture(host), architecture(target)
+    selected = {**data["profiles"][target], "host": host, "target": target, "abi": data["abi"], "simd": data["simd"]}
+    return {**selected, "cache_key": cache_key(selected)}
+
+
+def cache_key(selected):
+    """Folder name of one build flavour: the target architecture and five hex digits of a hash over every other profile field
+    (host, target, toolchain, simd, C mode, triple, machine, cpu flags). The native generator is limited to 260 characters, so
+    the key is short (9 characters); any change of the profile still gets a new folder."""
+    short = {"x86_64": "x64", "aarch64": "a64"}
+    fields = {name: value for name, value in selected.items() if name != "cache_key"}
+    digest = hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return "%s-%s" % (short[fields["target"]], digest[:5])
+
+
+def same_profile(recorded, selected):
+    """Stored records written before the short cache key carry the old folder name; every other field must still match."""
+    if not isinstance(recorded, dict):
+        return False
+    return ({k: v for k, v in recorded.items() if k != "cache_key"} ==
+            {k: v for k, v in selected.items() if k != "cache_key"})
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+class PE:
+    """Bounded PE32+ reader for normal and delay-load DLL import names."""
+    def __init__(self, path):
+        self.path = Path(path)
+        self.data = self.path.read_bytes()
+        if self.data[:2] != b"MZ":
+            raise ValueError("Expected PE executable: " + self.path.name)
+        pe = self.unpack("<I", 0x3c)[0]
+        if self.slice(pe, 4) != b"PE\0\0":
+            raise ValueError("Invalid PE signature: " + self.path.name)
+        self.machine, count = self.unpack("<HH", pe + 4)
+        optional_size = self.unpack("<H", pe + 20)[0]
+        optional = pe + 24
+        if optional_size < 112 or self.unpack("<H", optional)[0] != 0x20b:
+            raise ValueError("Expected 64-bit PE optional header: " + self.path.name)
+        self.slice(optional, optional_size)
+        self.header_size = self.unpack("<I", optional + 60)[0]
+        self.image_base = self.unpack("<Q", optional + 24)[0]
+        directory_count = self.unpack("<I", optional + 108)[0]
+        if directory_count > (optional_size - 112) // 8:
+            raise ValueError("Invalid PE directory count")
+        self.directories = [self.unpack("<II", optional + 112 + i * 8)
+                            for i in range(directory_count)]
+        self.sections = []
+        for i in range(count):
+            section = optional + optional_size + i * 40
+            self.slice(section, 40)
+            virtual_size, rva, raw_size, offset = self.unpack("<IIII", section + 8)
+            self.slice(offset, raw_size)
+            self.sections.append((rva, raw_size, offset))
+
+    def slice(self, offset, size):
+        if offset < 0 or size < 0 or offset > len(self.data) - size:
+            raise ValueError("Truncated PE: " + self.path.name)
+        return self.data[offset:offset + size]
+
+    def unpack(self, fmt, offset):
+        return struct.unpack(fmt, self.slice(offset, struct.calcsize(fmt)))
+
+    def location(self, rva, size):
+        if rva < self.header_size and rva + size <= self.header_size:
+            self.slice(rva, size)
+            return rva
+        for start, length, offset in self.sections:
+            if start <= rva and rva + size <= start + length:
+                return offset + rva - start
+        raise ValueError("Unmapped PE RVA: " + self.path.name)
+
+    def dll_name(self, rva):
+        name = bytearray()
+        for i in range(256):
+            byte = self.slice(self.location(rva + i, 1), 1)[0]
+            if not byte:
+                text = name.decode("ascii")
+                if not re.fullmatch(r"[A-Za-z0-9_.+-]+\.dll", text, re.I):
+                    raise ValueError("Invalid PE DLL name")
+                return text.lower()
+            name.append(byte)
+        raise ValueError("Unterminated PE DLL name")
+
+    def imports(self):
+        result = set()
+        for index, width, name_index in ((1, 20, 3), (13, 32, 1)):
+            if index >= len(self.directories):
+                continue
+            rva, size = self.directories[index]
+            if not rva and not size:
+                continue
+            terminated = False
+            for offset in range(0, size - width + 1, width):
+                entry = self.unpack("<" + "I" * (width // 4), self.location(rva + offset, width))
+                if not any(entry):
+                    terminated = True
+                    break
+                name_rva = entry[name_index]
+                if index == 13 and not (entry[0] & 1):
+                    name_rva -= self.image_base
+                result.add(self.dll_name(name_rva))
+            if not terminated:
+                raise ValueError("Unterminated PE import directory")
+        return result
+
+
+SYSTEM_DLLS = frozenset("""
+advapi32.dll authz.dll avrt.dll bcrypt.dll bcryptprimitives.dll cfgmgr32.dll combase.dll comctl32.dll
+comdlg32.dll crypt32.dll d3d9.dll d3d11.dll d3d12.dll dbghelp.dll dinput8.dll
+dsound.dll dwmapi.dll dxgi.dll d2d1.dll dnsapi.dll dwrite.dll gdi32.dll hid.dll imm32.dll iphlpapi.dll
+kernel32.dll kernelbase.dll mpr.dll mscms.dll msimg32.dll msvcrt.dll ncrypt.dll netapi32.dll ntdll.dll ole32.dll oleaut32.dll
+powrprof.dll propsys.dll rpcrt4.dll secur32.dll setupapi.dll shell32.dll
+shcore.dll shlwapi.dll user32.dll userenv.dll usp10.dll uxtheme.dll ucrtbase.dll version.dll winhttp.dll
+winmm.dll wintrust.dll ws2_32.dll wtsapi32.dll xinput1_4.dll
+""".split())
+
+
+# Microsoft's Visual C++ runtime may only be redistributed by licensed Visual Studio users, so the archive never carries
+# it: the installer asks for Microsoft's own redistributable instead (see components.rs).
+VC_RUNTIME_DLLS = frozenset("vcruntime140.dll vcruntime140_1.dll msvcp140.dll msvcp140_1.dll concrt140.dll vcomp140.dll".split())
+
+
+def dll_closure(executable, candidates, target, dynamic=(), allow_build_tools=False):
+    """Resolve only explicitly inventoried files; never search PATH or copy a tool bin tree."""
+    expected = profile(target)["machine"]
+    providers = {}
+    for path in map(Path, candidates):
+        name = path.name.lower()
+        if name in providers:
+            raise ValueError("Ambiguous DLL provider: " + name)
+        providers[name] = path
+    pending = [Path(executable)]
+    for name in dynamic:
+        if name.lower() not in providers:
+            raise ValueError("Missing dynamically loaded DLL: " + name)
+        pending.append(providers[name.lower()])
+    selected = {}
+    while pending:
+        path = pending.pop()
+        name = path.name.lower()
+        if name in selected:
+            continue
+        if not allow_build_tools and any(word in name for word in ("unicorn", "python", "clang", "lld.exe")):
+            raise ValueError("Build-only dependency in game package: " + name)
+        image = PE(path)
+        if image.machine != expected:
+            raise ValueError("Wrong PE architecture: " + name)
+        selected[name] = path
+        for dependency in sorted(image.imports()):
+            if dependency in SYSTEM_DLLS or re.fullmatch(r"(api|ext)-ms-win-[a-z0-9-]+\.dll", dependency):
+                continue
+            if dependency in VC_RUNTIME_DLLS:
+                continue  # installed system-wide from Microsoft's redistributable
+            if dependency == "vulkan-1.dll":
+                continue  # GPU-vendor loader; the renderer must diagnose its absence.
+            if dependency not in providers:
+                raise ValueError(f"Missing DLL: {dependency} (required by {name})")
+            pending.append(providers[dependency])
+    return [selected[name] for name in sorted(selected)]
+
+
+def compiler_identity(compiler, selected, run=subprocess.run):
+    resolved = shutil.which(str(compiler))
+    if not resolved:
+        raise ValueError("LLVM-MinGW C compiler is missing: " + str(compiler))
+    resolved = str(Path(resolved).resolve())
+    def query(*arguments, **kwargs):
+        return run([resolved, *arguments], check=True, capture_output=True,
+                   text=True, **kwargs).stdout.strip()
+    triple = query("-dumpmachine")
+    expected = selected["target"]
+    if not triple.startswith(expected + "-") or not ("mingw" in triple or "windows-gnu" in triple):
+        raise ValueError("Expected LLVM-MinGW compiler for " + selected["triple"] + ", got " + triple)
+    macros = query("-dM", "-E", "-x", "c", "-", input="#include <_mingw.h>\n")
+    if not re.search(r"^#define __MINGW32__\b", macros, re.M) or not re.search(
+            r"^#define _UCRT\b", macros, re.M):
+        raise ValueError("Windows compiler must use MinGW UCRT, not MSVC or MSVCRT")
+    return {"path": resolved, "sha256": sha256(resolved),
+            "version": query("--version"), "triple": triple,
+            "macros_sha256": hashlib.sha256(macros.encode()).hexdigest()}

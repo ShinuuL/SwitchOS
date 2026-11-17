@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""Runs the installer driver build headlessly on the private CI data and reports only what is safe to show.
+
+The driver's JSON event stream goes to a file inside the (wiped) base folder, never to the Actions log. What is printed and
+written to the summary: step names with their status, the result code, and error messages with every known path and every
+long hex run replaced. Standard library only.
+
+Target ios exports an IPA without game data (ad hoc signed, no device or Apple account) to BASE/ios-export, then checks it with
+ipa_pack.py and prints only its size and file count. The iPhoneOS FFmpeg libraries are kept in BASE/ffmpeg-ios.
+
+Usage: full_build.py --target T --root SRC --base BASE [--python PY] [--mod] [--windows-catalog F] [--ips-helper F]
+       [--firmware-helper F] [--extract F --extract-prefix P] [--summary FILE] [--installed-out FILE]
+BASE holds data/ (decrypted inputs from private_data.py), mods/, work/, install/ and logs/.
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+TARGETS = ("macos", "linux", "windows", "ios")
+HEX_RUN = re.compile(r"[0-9a-fA-F]{24,}")
+
+
+def redact(text, known, limit=300):
+    forms = []
+    for value in known:
+        if value:
+            forms += [str(value), str(value).replace("\\", "/"), str(value).replace("\\", "\\\\")]
+    for form in sorted(set(forms), key=len, reverse=True):
+        text = text.replace(form, "<path>")
+    return HEX_RUN.sub("<hex>", text)[:limit]
+
+
+def build_command(args, python=None):
+    base = Path(args.base)
+    data = base / "data"
+    # Every pipeline wants its work folder inside the checkout: Mac and Linux refuse any other (driver.py), and the Windows
+    # icon step stops with "Icon output must remain under work/" when work is a sibling of the checkout.
+    work = Path(args.root) / "work"
+    command = [python or args.python or sys.executable]
+    command += ["-I", "-B"] if args.target == "windows" else ["-B"]
+    command += [str(Path(args.root) / "scripts/install/driver.py"), "build", "--root", str(args.root),
+                "--work", str(work), "--target", args.target,
+                "--base", str(data / "game.xci"), "--prod-keys", str(data / "prod.keys"),
+                "--update", str(data / "update.nsp")]
+    if args.target != "ios":
+        command += ["--install-root", str(base / "install")]
+    if not getattr(args, "no_firmware", False):
+        command += ["--firmware", str(data / "firmware.zip")]
+    for option, value in (("--windows-catalog", args.windows_catalog), ("--ips-helper", args.ips_helper),
+                          ("--firmware-helper", args.firmware_helper)):
+        if value:
+            command += [option, str(value)]
+    if args.target == "ios":
+        command += ["--ios-delivery", "ipa", "--ios-export-no-embed", "--ios-export-dir", str(base / "ios-export")]
+    if args.mod:
+        command += ["--mod-root", str(base / "mods/ci-mod"), "--mod-name", "ci-mod", "--mods-dir", str(base / "mods")]
+    return command
+
+
+def link_work(args):
+    """The checkout's work/ points at the big disk (BASE), so the disk space check and the build use BASE."""
+    if args.target == "windows":
+        return
+    link = Path(args.root) / "work"
+    if link.exists() or link.is_symlink():
+        return
+    target = Path(args.base) / "work"
+    target.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target, target_is_directory=True)
+
+
+def build_environment(args, environ=os.environ):
+    base = Path(args.base)
+    env = dict(environ)
+    env.update({"BDSP_SHADER_CACHE_DIR": str(base / "shader-cache"), "BDSP_MOD": "ci-mod" if args.mod else "none",
+                "BDSP_NO_DIAGNOSTICS": "1", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"})
+    if args.mod:
+        env["BDSP_MODS_DIR"] = str(base / "mods")
+    if args.extract:
+        env["BDSP_EXTRACT"] = str(args.extract)
+        if args.extract_prefix:
+            env["BDSP_EXTRACT_PREFIX"] = args.extract_prefix
+    if args.target == "ios":
+        env["BDSP_IOS_FFMPEG_DIR"] = str(base / "ffmpeg-ios")
+    if args.target == "windows":
+        env["BDSP_INSTALLER_PRIVATE_RUNTIME"] = "1"
+        for name in ("PYTHONPATH", "PYTHONHOME", "BDSP_CPU_TARGET"):
+            env.pop(name, None)
+    return env
+
+
+def compile_profile(root):
+    """Where the Linux compile time went: totals and the slowest chunks, by wall seconds and opt level only (no names)."""
+    times = Path(root) / "logs/build-c.times"
+    if not times.is_file():
+        return None
+    rows = []
+    for line in times.read_text(encoding="utf-8", errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) >= 7:
+            try:
+                rows.append((float(parts[1]), float(parts[2]), int(parts[4]), parts[-1]))
+            except ValueError:
+                continue
+    if not rows:
+        return None
+    rows.sort(reverse=True)
+    wall = sum(row[0] for row in rows)
+    return {"chunks": len(rows), "cpu_wall_seconds": round(wall), "by_opt": {
+                opt: round(sum(r[0] for r in rows if r[3] == opt)) for opt in sorted({r[3] for r in rows})},
+            "slowest": [{"seconds": round(r[0], 1), "mib_rss": round(r[2] / 1024), "opt": r[3]} for r in rows[:5]]}
+
+
+class StageProgress:
+    """Turns the driver's events into short live lines for the job log: step names, percentages and seconds only
+    (never a path, a message or any data), so a running build is visible and nothing from the game can leak."""
+
+    def __init__(self, started=0.0):
+        self.started = started
+        self.current = None
+        self.next_mark = {}
+
+    def stamp(self, now):
+        seconds = int(now - self.started)
+        return "[%02d:%02d]" % (seconds // 60, seconds % 60)
+
+    def feed(self, line, now):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return []
+        if not isinstance(event, dict):
+            return []
+        kind, name = event.get("event"), str(event.get("id", ""))
+        if kind == "step" and name and re.fullmatch(r"[a-z0-9_]{1,24}", name):
+            status = str(event.get("status", ""))
+            if status == "started":
+                self.current = name
+                return ["%s %s started" % (self.stamp(now), name)]
+            tail = " (%d s)" % round(event["elapsed_seconds"]) if isinstance(event.get("elapsed_seconds"), (int, float)) else ""
+            return ["%s %s %s%s" % (self.stamp(now), name, re.sub(r"[^a-z ]", "", status)[:20], tail)]
+        if kind == "progress" and name and re.fullmatch(r"[a-z0-9_]{1,24}", name):
+            done, total = event.get("completed"), event.get("total")
+            if isinstance(done, int) and isinstance(total, int) and total > 0:
+                percent = done * 100 // total
+                if percent >= self.next_mark.get(name, 10) and percent < 100:
+                    self.next_mark[name] = percent // 10 * 10 + 10
+                    return ["%s %s %d%% (%d of %d)" % (self.stamp(now), name, percent, done, total)]
+        return []
+
+    def heartbeat(self, now):
+        return "%s still running%s" % (self.stamp(now), (": " + self.current) if self.current else "")
+
+
+def run_driver(command, args, events, stderr, heartbeat_seconds=300, clock=time.monotonic):
+    """Runs the driver, copies its events to the file and prints the live progress. Returns the exit code."""
+    import queue
+    import threading
+    process = subprocess.Popen(command, cwd=args.root, env=build_environment(args), stdout=subprocess.PIPE,
+                               stderr=stderr, stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace")
+    lines = queue.Queue()
+
+    def read():
+        for line in process.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=read, daemon=True).start()
+    progress = StageProgress(clock())
+    last_print = clock()
+    while True:
+        try:
+            line = lines.get(timeout=heartbeat_seconds)
+        except queue.Empty:
+            print(progress.heartbeat(clock()), flush=True)
+            continue
+        if line is None:
+            break
+        events.write(line)
+        events.flush()
+        for text in progress.feed(line, clock()):
+            print(text, flush=True)
+            last_print = clock()
+        if clock() - last_print > heartbeat_seconds:
+            print(progress.heartbeat(clock()), flush=True)
+            last_print = clock()
+    return process.wait()
+
+
+def ffmpeg_report(args):
+    """Size and build time of the iPhoneOS FFmpeg libraries, numbers only. The time runs from the finished source download to
+    the stamp that is written last (unpacking, configure, make); it is None when the libraries came from a cache."""
+    folder = Path(args.base) / "ffmpeg-ios"
+    libraries = sorted((folder / "lib").glob("*.a"))
+    if not libraries:
+        return None
+    report = {"libraries": len(libraries), "mib": round(sum(path.stat().st_size for path in libraries) / 2**20, 1)}
+    sources = sorted((Path(args.root) / "work/ios").glob("ffmpeg-*.tar.xz"))
+    stamp = folder / ".bdsp-stamp"
+    if sources and stamp.is_file() and stamp.stat().st_mtime >= sources[0].stat().st_mtime:
+        report["build_seconds"] = round(stamp.stat().st_mtime - sources[0].stat().st_mtime)
+    return report
+
+
+def ipa_report(args, ipa, python=None):
+    """Runs ipa_pack.py check on the exported IPA. Returns (ok, details) with the size and the number of files only."""
+    import zipfile
+    details = {}
+    try:
+        path = Path(ipa)
+        with zipfile.ZipFile(path) as archive:
+            details = {"mib": round(path.stat().st_size / 2**20, 1),
+                       "files": sum(1 for item in archive.infolist() if not item.is_dir())}
+    except (OSError, ValueError, zipfile.BadZipFile):
+        return False, details
+    check = subprocess.run([python or args.python or sys.executable, "-B", str(Path(args.root) / "scripts/install/ipa_pack.py"),
+                            "check", "--ipa", str(ipa)], capture_output=True, text=True, check=False)
+    details["check"] = "ok" if check.returncode == 0 else "failed"
+    return check.returncode == 0, details
+
+
+def summarize(lines, known):
+    steps, errors, missing, result, installed, seconds = {}, [], [], None, None, {}
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        kind = event.get("event")
+        if kind == "step" and "id" in event:
+            steps[str(event["id"])] = str(event.get("status", ""))
+            if isinstance(event.get("elapsed_seconds"), (int, float)):
+                seconds[str(event["id"])] = round(event["elapsed_seconds"])
+        elif kind == "error":
+            errors.append({"code": event.get("code"), "message": redact(str(event.get("message", "")), known)})
+        elif kind == "log" and str(event.get("message", "")).startswith("MISSING"):
+            missing.append(redact(str(event["message"]), known))
+        elif kind == "result":
+            result = {"ok": bool(event.get("ok")), "code": event.get("code")}
+        elif kind == "artifact" and event.get("kind") in ("installed_application", "ipa"):
+            installed = event.get("path")
+    summary = {"steps": steps, "errors": errors[-5:], "result": result}
+    if seconds:
+        summary["stage_seconds"] = seconds
+    if missing:
+        summary["missing"] = missing[:20]
+    return summary, installed
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", required=True, choices=TARGETS)
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--base", required=True)
+    parser.add_argument("--python")
+    parser.add_argument("--mod", action="store_true")
+    parser.add_argument("--windows-catalog")
+    parser.add_argument("--ips-helper")
+    parser.add_argument("--firmware-helper")
+    parser.add_argument("--no-firmware", action="store_true",
+                        help="build without the firmware step (for a data set whose firmware needs newer prod.keys)")
+    parser.add_argument("--link-work", action="store_true",
+                        help="point the checkout's work/ at BASE/work (only when BASE is on a bigger disk; a symlinked work/ "
+                             "makes the packaging step refuse the app as not ignored by git)")
+    parser.add_argument("--extract")
+    parser.add_argument("--extract-prefix")
+    parser.add_argument("--summary")
+    parser.add_argument("--installed-out")
+    args = parser.parse_args(argv)
+    base = Path(args.base)
+    if args.target == "ios" and (base.resolve() == Path(args.root).resolve() or
+                                 Path(args.root).resolve() in base.resolve().parents):
+        print("FAILED: the base folder (it holds the iOS export) must be outside the checkout.", flush=True)
+        return 2
+    logs = base / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    if getattr(args, "link_work", False):
+        link_work(args)
+    print("free GB before the build: %d under the base folder, %d under the checkout" % (
+        shutil.disk_usage(base).free // 2**30, shutil.disk_usage(Path(args.root)).free // 2**30), flush=True)
+    with open(logs / "driver-events.jsonl", "w", encoding="utf-8") as events, \
+            open(logs / "driver-stderr.log", "w", encoding="utf-8") as stderr:
+        code = run_driver(build_command(args), args, events, stderr)
+    known = [args.base, args.root, os.environ.get("RUNNER_TEMP"), str(Path.home())]
+    lines = (logs / "driver-events.jsonl").read_text(encoding="utf-8", errors="replace").splitlines()
+    summary, installed = summarize(lines, known)
+    summary.update({"target": args.target, "mod": args.mod, "exit": code, "seconds": int(time.monotonic() - started)})
+    ok = code == 0 and bool(summary["result"] and summary["result"]["ok"])
+    profile = compile_profile(args.root)
+    if profile:
+        summary["compile_profile"] = profile
+    if args.target == "ios":
+        ffmpeg = ffmpeg_report(args)
+        if ffmpeg:
+            summary["ffmpeg"] = ffmpeg
+        if ok:
+            ipa_ok, summary["ipa"] = ipa_report(args, installed) if installed else (False, {})
+            ok = ipa_ok
+    print(json.dumps(summary, indent=2))
+    if args.target == "ios" and summary.get("ffmpeg"):
+        print("FFmpeg libraries: %(libraries)d files, %(mib)s MiB%(took)s" % {**summary["ffmpeg"], "took": (
+            ", built in %d s" % summary["ffmpeg"]["build_seconds"]) if "build_seconds" in summary["ffmpeg"] else ", reused"}, flush=True)
+    if args.target == "ios" and "ipa" in summary:
+        ipa = summary["ipa"]
+        print("IPA: %s MiB, %s files, ipa_pack check %s" % (ipa.get("mib", "?"), ipa.get("files", "?"), ipa.get("check", "not run")),
+              flush=True)
+    if not ok:
+        tail = [redact(line, known) for line in lines if '"event": "log"' in line][-15:]
+        stderr_tail = [redact(line, known) for line in (logs / "driver-stderr.log").read_text(
+            encoding="utf-8", errors="replace").splitlines()[-25:]]
+        print("driver log tail:\n" + "\n".join(tail) + "\ndriver stderr tail:\n" + "\n".join(stderr_tail), flush=True)
+        reasons = {0: "the build passed but the IPA is missing or failed its check", 8: "not enough disk space",
+                   4: "a tool or component is missing"}
+        print("FAILED: exit %s (%s). Missing items: %s. Last error: %s" % (
+            code, reasons.get(code, "see the steps above"), "; ".join(summary.get("missing", [])) or "none reported",
+            summary["errors"][-1]["message"].splitlines()[0] if summary["errors"] else "none"), flush=True)
+    if args.summary:
+        Path(args.summary).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    if args.installed_out and installed and ok:
+        Path(args.installed_out).write_text(str(installed), encoding="utf-8")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

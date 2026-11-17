@@ -1,0 +1,37 @@
+# Working notes and todos (local, not in the repo)
+todo/
+goal.md
+info.txt
+
+# Nie committen: Keys, Dumps, Saves, extrahierte Inhalte
+nsp/
+Ryujinx/
+Ryujinx_*/
+work/
+/work-*/
+tools/
+research/
+shader_translator/build/
+shader_translator/__pycache__/
+*.keys
+*.xci
+*.nsp
+*.nca
+*.nso
+*.nro
+*.romfs
+.DS_Store
+__pycache__/
+
+# Xcode: user state (window layout, open files, paths with user names) does not belong in the repo
+xcuserdata/
+*.xcuserstate
+
+cache/
+*.bundle
+!scripts/recomp/ios/app/Settings.bundle/
+*.ipa
+*.p12
+*.mobileprovision
+*.cer
+/sbom/

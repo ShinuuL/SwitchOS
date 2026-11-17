@@ -1,0 +1,490 @@
+"""Private offline Windows pipeline; public release qualification stays separate."""
+import argparse
+import contextlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import uuid
+
+from scripts.recomp import portable_build as build
+from scripts.recomp.app import game_icons
+from scripts.install import pathlimits, vk_shaders
+from scripts.install.progress import GeneratorProgress
+
+
+class _PrintedAsLog(io.TextIOBase):
+    """What a library prints becomes log events: the driver's stdout carries only protocol lines (the installer rejects anything else)."""
+
+    def __init__(self, emit):
+        self.emit = emit
+        self.target = sys.stdout
+        self.pending = ""
+
+    def writable(self):
+        return True
+
+    def write(self, text):
+        self.pending += text
+        *lines, self.pending = self.pending.split("\n")
+        for line in lines:
+            self._log(line)
+        return len(text)
+
+    def _log(self, line):
+        if line.strip():
+            current, sys.stdout = sys.stdout, self.target
+            try:
+                self.emit("log", level="diagnostic", message=line.rstrip())
+            finally:
+                sys.stdout = current
+
+
+@contextlib.contextmanager
+def printed_as_log(emit):
+    writer = _PrintedAsLog(emit)
+    with contextlib.redirect_stdout(writer):
+        yield
+    writer._log(writer.pending)
+
+
+def toolchain_files(root):
+    build.filesystem.reject_link(root)
+    files = []
+    for parent, directories, names in os.walk(root):
+        for name in [*directories, *names]:
+            build.filesystem.reject_link(Path(parent) / name)
+        files.extend(Path(parent) / name for name in sorted(names))
+    return files
+
+
+def write_catalog(output, compiler, generator, selected, **bundles):
+    output = Path(output).resolve()
+    if output.exists():
+        raise ValueError("Refusing to replace an existing private dependency catalog")
+    compiler = Path(build.compiler_identity(compiler, selected)["path"])
+    generator = Path(generator).resolve()
+    paths = {name: build.verified_bundle(path, selected) for name, path in bundles.items()}
+    if set(paths) != {"sdl", "vulkan", "ffmpeg", "hactool", "qt"}:
+        raise ValueError("SDL, Vulkan, FFmpeg, hactool and Qt bundles are required")
+    build.qt_development(paths["qt"], compiler, selected)
+    closure = build.windows.dll_closure(generator, generator.parent.glob("*.dll"),
+                                        selected["host"], allow_build_tools=True)
+    if build.windows.PE(generator).machine != build.windows.profile(selected["host"])["machine"]:
+        raise ValueError("The generator architecture does not match the host")
+    toolchain = compiler.parent.parent
+    files = [*toolchain_files(toolchain), *closure, *(path / "build.json" for path in paths.values())]
+    build.atomic_json(output, {
+        "schema": 1, "private_only": True, "profile": selected,
+        "compiler": os.path.relpath(compiler, output.parent),
+        "toolchain": os.path.relpath(toolchain, output.parent),
+        "generator": os.path.relpath(generator, output.parent),
+        "bundles": {name: os.path.relpath(path, output.parent) for name, path in paths.items()},
+        "files": {os.path.relpath(path, output.parent): build.windows.sha256(path) for path in files},
+        "release_qualified": False,
+    })
+    return output
+
+
+def read_catalog(path, target):
+    path = Path(path).resolve()
+    record = json.loads(path.read_text(encoding="utf-8"))
+    selected = build.windows.profile(target)
+    if (record.get("schema") != 1 or record.get("private_only") is not True or
+            record.get("release_qualified") is not False or
+            not build.windows.same_profile(record.get("profile"), selected) or not record.get("files")):
+        raise ValueError("The private Windows catalog does not match the host/target profile")
+    if target != "x86_64" or selected["host"] != "x86_64":
+        raise ValueError("The full native pipeline currently has only amd64 development dependencies")
+    for name, digest in record["files"].items():
+        if build.windows.sha256(path.parent / name) != digest:
+            raise ValueError("A private Windows catalog file changed; prepare a new catalog")
+    bundles = {name: build.verified_bundle(path.parent / relative, selected)
+               for name, relative in record["bundles"].items()}
+    if set(bundles) != {"sdl", "vulkan", "ffmpeg", "hactool", "qt"}:
+        raise ValueError("The private dependency catalog is incomplete")
+    compiler = (path.parent / record["compiler"]).resolve()
+    build.qt_development(bundles["qt"], compiler, selected)
+    generator = (path.parent / record["generator"]).resolve()
+    toolchain = (path.parent / record["toolchain"]).resolve()
+    if compiler.parent.parent != toolchain:
+        raise ValueError("The private compiler is outside its inventoried toolchain")
+    closure = build.windows.dll_closure(generator, generator.parent.glob("*.dll"),
+                                        selected["host"], allow_build_tools=True)
+    for file in (*toolchain_files(toolchain), *closure, *(bundle / "build.json" for bundle in bundles.values())):
+        if os.path.relpath(file, path.parent) not in record["files"]:
+            raise ValueError("The private dependency catalog has an untracked input")
+    build.compiler_identity(compiler, selected)
+    return selected, compiler, generator, bundles
+
+
+def prerequisites(catalog, target, work, minimum_free_gb=40):
+    if sys.platform != "win32":
+        raise ValueError("The Windows pipeline requires a native Windows host")
+    version = sys.getwindowsversion()
+    if version.major < 10 or version.build < 19045:
+        raise ValueError("Windows 10 22H2 (19045) or Windows 11 is required")
+    result = read_catalog(catalog, target)
+    destination = Path(work).resolve()
+    while not destination.exists():
+        destination = destination.parent
+    if shutil.disk_usage(destination).free < minimum_free_gb * 10**9:
+        raise ValueError("Not enough free space for the native Windows build")
+    return result
+
+
+def install_location(args, mod=None):
+    """Where the finished app is installed, or None when the per-user application data folder is unknown."""
+    override = getattr(args, "install_root", None)
+    if override:
+        return Path(override) / pathlimits.installed_folder(mod)
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return None
+    # A mod app is installed beside the game; the game's app stays unchanged.
+    return Path(local) / ("StrahlenderXnu/mod-apps/" + pathlimits.installed_folder(mod) if mod else "StrahlenderXnu/app")
+
+
+def package_contents(bundles, root):
+    """Paths below the package root of the files that are copied from the bundles and the source tree (the notices and the
+    language folder); the game data is planned separately."""
+    found = []
+    trees = {"notices/" + name: Path(path) / "notices" for name, path in bundles.items() if name in ("sdl", "vulkan", "ffmpeg", "qt")}
+    trees["lproj"] = Path(root) / "scripts/recomp/runtime/app/linux/lproj"
+    for prefix, tree in trees.items():
+        for folder, _directories, names in os.walk(tree):
+            relative = os.path.relpath(folder, tree)
+            base = prefix if relative == "." else prefix + "/" + relative.replace(os.sep, "/")
+            found.extend(base + "/" + name for name in names)
+    return found
+
+
+def path_length(work, selected, modules=pathlimits.MODULES, romfs=(), mod=None, package=(), install=None):
+    """The Windows path length check of a work folder (see pathlimits)."""
+    return pathlimits.check(Path(work).resolve(), selected["cache_key"], modules, romfs, pathlimits.long_paths_enabled(),
+                            mod, package, install)
+
+
+def publish_package(candidate, destination):
+    """Replace only the installer's unchanged binary; preserve a failed rollback."""
+    candidate, destination = Path(candidate), Path(destination)
+    package_record(candidate)
+    if destination.exists():
+        try:
+            package_record(destination)
+            owned = True
+        except (OSError, ValueError, KeyError, TypeError):
+            owned = False
+        if not owned:
+            raise FileExistsError("The existing application is not this installer's unchanged Windows package")
+    return build.filesystem.publish_tree(candidate, destination)
+
+
+def package_record(package):
+    package = Path(package)
+    build.filesystem.reject_link(package)
+    build.filesystem.reject_link(package / "package.json")
+    record = json.loads((package / "package.json").read_text(encoding="utf-8"))
+    if (not isinstance(record, dict) or record.get("schema") != 1 or
+            not build.windows.same_profile(record.get("target"), build.windows.profile("x86_64")) or
+            not isinstance(record.get("files"), dict) or "BDSP.exe" not in record["files"]):
+        raise ValueError("The Windows package receipt is incomplete or has the wrong target")
+    build.filesystem.verify_inventory(package, record["files"], ignored=("package.json",))
+    return record
+
+
+def install_package(package, destination, emit):
+    package, destination = Path(package), Path(destination)
+    package_record(package)
+    emit("step", id="install", status="started")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=pathlimits.INSTALL_PREFIX, dir=destination.parent) as temporary:
+        staged = Path(temporary) / "app"
+        build.filesystem.copy_tree(package, staged, link=True)   # the game data is linked, not written again
+        publish_package(staged, destination)
+    emit("step", id="install", status="complete")
+    executable = destination / "BDSP.exe"
+    emit("artifact", kind="installed_application", path=str(executable))
+    return executable
+
+
+def extract_game(base, prod_keys, work, hactool, *, update=None, title_keys=None, icons=None, progress=None):
+    """Runs the Rust extract step (installer/extract) through the installer executable passed in BDSP_EXTRACT."""
+    tool = os.environ.get("BDSP_EXTRACT")
+    if not tool:
+        raise ValueError("The installer's extract tool is unavailable (BDSP_EXTRACT is not set)")
+    prefix = [os.environ["BDSP_EXTRACT_PREFIX"]] if os.environ.get("BDSP_EXTRACT_PREFIX") else []
+    command = [tool, *prefix, "extract", "--base", str(base), "--keys", str(prod_keys),
+               "--hactool", str(hactool), "--work", str(work)]
+    for flag, value in (("--update", update), ("--title-keys", title_keys), ("--icons", icons)):
+        if value:
+            command += [flag, str(value)]
+    # Lines are forwarded while the tool runs, so the installer shows each sub-step and the progress as they happen.
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, encoding="utf-8", errors="replace")
+    errors = []
+    reader = threading.Thread(target=lambda: errors.extend(process.stderr), daemon=True)
+    reader.start()
+    try:
+        for line in process.stdout:
+            if progress:
+                progress(line.rstrip("\r\n"))
+        code = process.wait()
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        reader.join(timeout=5)
+        process.stdout.close()
+        process.stderr.close()
+    if code:
+        # The tool prints only its own messages, never hactool output.
+        message = next((line[7:].rstrip() for line in reversed(errors) if line.startswith("ERROR: ")), "")
+        raise ValueError(message or "Native extraction failed; check the selected dump, update and keys.")
+    return Path(work) / "manifest.json"
+
+
+def mod_launch_file(mod, compiled):
+    """mod.txt beside BDSP.exe: the runtime starts this mod by default (win32_entry.c). The runtime finds a mod by its folder name
+    (mods.c), so that name is the selection key; the display name only goes into the window title and the icons."""
+    key = Path(mod["root"]).name
+    mods_dir = pathlimits.plain_path(mod["mods_dir"])
+    for value in (key, mods_dir):
+        if not value or any(character in value for character in "\r\n\0"):
+            raise ValueError("Mod name and folder cannot contain newlines.")
+    return "%s\n%s\n%s\n" % (key, mods_dir, "exefs" if compiled else "romfs")
+
+
+def _mod_has_code(mod_root):
+    root = Path(mod_root)
+    for folder in root.iterdir():
+        if folder.name.lower() == "exefs" and folder.is_dir():
+            return any(item.name.lower() not in ("license", "notice", ".ds_store") for item in folder.iterdir())
+    return False
+
+
+def build_game(args, emit, mod=None, stage_code_mod=None):
+    """Builds and installs the game; with a mod, a separate app that starts the mod with its own save.
+
+    mod is the driver's validated selection (name, mods_dir, root, identity, slug). stage_code_mod(work, cache)
+    stages the mod's IPS/IPS32 patches and subsdk1 with ips_patch and returns the staged ExeFS (or None).
+    """
+    selected, compiler, generator, bundles = prerequisites(
+        args.windows_catalog, "aarch64" if args.target == "windows-arm64" else "x86_64", args.work)
+    if getattr(args, "mod_root", None) and not mod:
+        raise ValueError("The selected mod was not validated; start the build through the installer driver")
+    root, work = Path(args.root).resolve(), Path(args.work).resolve()
+    output = work / "recomp" / selected["cache_key"]
+    if output.resolve() != output:
+        raise ValueError("The native build cache must not pass through a symbolic link or reparse point")
+    for name in ("base", "prod_keys", "title_keys", "update", "mod_root", "windows_catalog"):
+        value = getattr(args, name, None)
+        if value and any(Path(value).resolve().is_relative_to(cache) for cache in
+                         (output, work / "recomp/mods", work / "recomp/mod-apps")):
+            raise ValueError("Selected inputs must remain outside the replaceable native build cache")
+    icons = work / "recomp/icons/source"  # outside the replaceable build cache, like the other pipelines
+    exefs = work / "exefs"
+    # A mod app links its own executable and icons; RomFS-only mods reuse the game's compiled code.
+    app_output = (work / "recomp/mod-apps" / mod["identity"] / selected["cache_key"]) if mod else output
+    generator_progress = GeneratorProgress(4)
+    def tool_line(line):
+        progress = generator_progress.feed(line)
+        if progress:
+            emit("progress", **progress)
+        else:
+            emit("log", level="diagnostic", message=line)
+    class InstallerCommands(build.Commands):
+        def run(self, arguments):
+            try:
+                self.capture(arguments, on_line=tool_line)
+            except subprocess.CalledProcessError:
+                raise ValueError("Native compilation or generation failed; see the technical log.") from None
+    commands = InstallerCommands()
+    def stage(name, function):
+        emit("step", id=name, status="started")
+        try:
+            result = function()
+        except BaseException:
+            emit("step", id=name, status="failed")
+            raise
+        emit("step", id=name, status="complete")
+        return result
+    def extract_line(text):
+        # The tool's permille counter becomes progress; every other line stays in the log.
+        counter = re.fullmatch(r"extract progress (\d+)", text.strip())
+        if counter:
+            emit("progress", id="extract", completed=int(counter.group(1)), total=1000)
+        else:
+            emit("log", level="diagnostic", message=text)
+    try:
+        stage("extract", lambda: extract_game(
+            args.base, args.prod_keys, work, bundles["hactool"] / "hactool.exe",
+            update=args.update, title_keys=getattr(args, "title_keys", None),
+            progress=extract_line, icons=icons))
+        def verify_paths(names):
+            # The game data is known now: stop before hours of compilation if packaging would hit the limit.
+            paths = path_length(work, selected, names, pathlimits.romfs_relative(work), mod,
+                                package_contents(bundles, root), install_location(args, mod))
+            emit("log", level="diagnostic", message="[Diagnostics] " + paths.line())
+            if paths.risk:
+                raise ValueError(paths.failure())
+        def verify_exefs():
+            nonlocal exefs, output, app_output
+            build.modules(work / "exefs")
+            if not (work / "exefs/main.npdm").is_file():
+                raise ValueError("The native extractor produced no exefs/main.npdm")
+            staged = stage_code_mod(work, work / "recomp") if mod and stage_code_mod else None
+            if staged:
+                exefs = Path(staged["staged"])
+                output = app_output = Path(staged["build_dir"]) / selected["cache_key"]
+                emit("log", level="diagnostic", message="Code mod staged: the generator, compiler and runtime use the patched "
+                     "modules" + (" and subsdk1" if (exefs / "subsdk1").is_file() else "") + " in a separate build folder.")
+            elif mod and _mod_has_code(args.mod_root):
+                raise ValueError("The selected mod contains ExeFS code, but no ExeFS staging was provided")
+            names = build.modules(exefs)
+            if not (exefs / "main.npdm").is_file():
+                raise ValueError("The staged ExeFS has no main.npdm")
+            generator_progress.total = len(names)
+            verify_paths(names)
+        stage("exefs", verify_exefs)
+        def prepare_shaders():
+            # SPIR-V for every shader of the game, so the first start does not compile them while the game runs. A skipped stage only
+            # means the game compiles at run time, as before; BDSP_NO_SHADER_BOOTSTRAP skips it like on the other targets.
+            if os.environ.get("BDSP_NO_SHADER_BOOTSTRAP"):
+                return
+            emit("step", id="shaders", status="started")
+            try:
+                vulkan = Path(bundles["vulkan"])
+                target_bin = Path(compiler).parent.parent / (selected["target"] + "-w64-mingw32") / "bin"
+                tools = {"cc": [str(compiler)], "suffix": ".exe", "cflags": ["-I", str(vulkan / "include")],
+                         "libs": ["-L", str(vulkan / "lib"), "-lshaderc_shared"],
+                         "env": {"PATH": os.pathsep.join([str(vulkan / "bin"), str(target_bin), os.environ.get("PATH", "")])},
+                         "toolchain": build.compiler_identity(compiler, selected)["sha256"],
+                         "shaderc": build.windows.sha256(vulkan / "build.json")}
+                status, _detail = vk_shaders.prepare(
+                    root, work, tools, lambda message: emit("log", level="diagnostic", message=message),
+                    lambda completed, total: emit("progress", id="shaders", completed=completed, total=total))
+            except (OSError, ValueError, KeyError) as error:
+                emit("log", level="diagnostic", message="shaders: skipped: %s" % error)
+                status = "skipped"
+            if status == "skipped":
+                emit("log", level="warning", message="Shaders were not prepared; the game compiles its shaders while it runs.")
+            emit("step", id="shaders", status="skipped" if status == "skipped" else "complete")
+        prepare_shaders()
+        def prepare_icons():
+            if not mod:
+                with printed_as_log(emit):
+                    return game_icons.build_windows(icons, app_output / "icons/windows")
+            embedded = True
+            try:
+                with printed_as_log(emit):
+                    game_icons.check_mod_artwork(mod["root"])
+            except ValueError:
+                embedded = False
+                emit("log", level="warning", message="The mod's title logo is stored in Unity bundles and could not be read by the Windows "
+                     "build runtime; the mod app uses the game icon with a MOD badge.")
+            with printed_as_log(emit):
+                return game_icons.build_windows(icons, app_output / "icons/windows", mod["root"], mod["name"],
+                                                embedded_logos=embedded)
+        if getattr(args, "clean_build", False) and output.exists():
+            # Keep all old outputs recoverable while building a fresh target cache.
+            previous = output.with_name(output.name + "-previous-" + uuid.uuid4().hex)
+            output.rename(previous)
+            emit("log", level="diagnostic", message="Previous native build outputs were preserved in " + str(previous))
+        stage("eh_gen", lambda: build.generate(generator, exefs, output / "gen", commands))
+        stage("clang", lambda: build.compile_sources(
+            output / "gen", output / "objects", compiler, selected, commands,
+            source_paths=build.generated_inventory(output / "gen"),
+            progress=lambda completed, total: emit("progress", id="clang", completed=completed, total=total)))
+        def prepare_images():
+            build.images(generator, exefs, output / "images",
+                         root / "scripts/recomp/runtime/hle_nvn.txt", commands)
+            prepare_icons()
+        stage("images", prepare_images)
+        def prepare_overlay():
+            # UI overlay for any aspect ratio, generated from the user's own RomFS. A failure only leaves gaps around the UI on non-16:9 shapes.
+            result = subprocess.run([sys.executable, str(root / "scripts/recomp/ui_aspect_patch.py"), "--if-needed",
+                                     "--romfs", str(work / "romfs"), "--out", str(work / "romfs-patch")],
+                                    capture_output=True, text=True, check=False)
+            if result.returncode:
+                emit("log", level="diagnostic", message="UI aspect overlay was not generated: " + result.stderr.strip()[-400:])
+        stage("ui_overlay", prepare_overlay)
+        runtime = stage("runtime", lambda: build.compile_runtime(
+            output / pathlimits.RUNTIME_DIR, compiler, selected, commands,
+            has_subsdk1=(exefs / "subsdk1").is_file(), root=root, qt=bundles["qt"],
+            **{name: bundles[name] for name in ("sdl", "vulkan", "ffmpeg")}))
+        executable = stage("link", lambda: build.link_executable(
+            output / "objects" / "compile.json", runtime,
+            build.graphical_libraries(compiler, selected, *(bundles[name] for name in ("sdl", "vulkan", "ffmpeg")),
+                                      qt=bundles["qt"]),
+            app_output / "BDSP.exe", compiler, selected, commands, icon=app_output / "icons/windows"))
+        app_folder = pathlimits.installed_folder(mod)
+        destination = work / pathlimits.PACKAGES / pathlimits.package_folder(mod)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=pathlimits.HOLDER_PREFIX, dir=destination.parent) as temporary:
+            def package():
+                dependencies = [bundles[name] for name in ("sdl", "vulkan", "ffmpeg", "qt")]
+                toolchain = Path(compiler).parent.parent
+                toolchain_license = toolchain / "LICENSE.TXT"
+                notices = {name: bundles[name] / "notices" for name in ("sdl", "vulkan", "ffmpeg", "qt")}
+                notices["mingw-runtime"] = toolchain / (selected["target"] + "-w64-mingw32") / "share/mingw32"
+                qt_conf = Path(temporary) / "qt.conf"
+                qt_conf.write_text("[Paths]\nPrefix=.\nPlugins=plugins\n", encoding="utf-8")
+                plugin = bundles["qt"] / "plugins/platforms/qwindows.dll"
+                data = {"img": output / "images", "romfs": work / "romfs",
+                        "exefs/main.npdm": exefs / "main.npdm",
+                        "icons/windows": app_output / "icons/windows",
+                        "plugins/platforms/qwindows.dll": plugin, "qt.conf": qt_conf,
+                        "lproj": root / "scripts/recomp/runtime/app/linux/lproj"}
+                if mod:
+                    launch = Path(temporary) / "mod.txt"
+                    launch.write_text(mod_launch_file(mod, exefs != work / "exefs"), encoding="utf-8")
+                    data["mod.txt"] = launch
+                if (work / "romfs-patch/.stamp").is_file():
+                    data["romfs-patch"] = work / "romfs-patch"
+                if vk_shaders.prebuilt_count(vk_shaders.folders(work)["prebuilt"]):
+                    data["prebuilt"] = vk_shaders.folders(work)["prebuilt"]
+                providers = build.runtime_dll_candidates(compiler, selected, dependencies)
+                dynamic = [path.name for path in build.windows.dll_closure(plugin, providers, selected["target"]) if path != plugin]
+                packaged = build.package_game(
+                    executable, build.runtime_dll_candidates(compiler, selected, dependencies),
+                    selected["target"], destination.parent / (pathlimits.STAGE_PREFIX + uuid.uuid4().hex[:8]),
+                    {"runtime.md": root / "scripts/recomp/runtime/NOTICE.md",
+                     "vulkan.md": root / "scripts/recomp/runtime/nvn/vulkan/NOTICE.md",
+                     "toolchain.txt": toolchain_license},
+                    dynamic=dynamic, notice_trees=notices, data=data)
+                return publish_package(packaged, destination)
+            stage("package", package)
+        install = install_location(args, mod)
+        if not install:
+            raise ValueError("The Windows per-user application data directory is unavailable")
+        return install_package(destination, install, emit)
+    except BaseException:
+        commands.cancel()
+        raise
+    finally:
+        commands.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Register verified private offline bundles; never downloads.")
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cc", required=True)
+    parser.add_argument("--generator", type=Path, required=True)
+    for name in ("sdl", "vulkan", "ffmpeg", "hactool"):
+        parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--qt", type=Path, required=True, help="Verified shared Qt6 LLVM-MinGW UCRT/libc++ bundle")
+    args = parser.parse_args()
+    write_catalog(args.output, args.cc, args.generator, build.windows.profile("x86_64"),
+                  **{name: getattr(args, name) for name in ("sdl", "vulkan", "ffmpeg", "hactool", "qt")})
+
+
+if __name__ == "__main__":
+    main()

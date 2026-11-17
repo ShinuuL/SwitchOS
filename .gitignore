@@ -1,0 +1,37 @@
+# Arquivos da Nintendo: nunca versionar (jogos, chaves, código gerado, saves)
+*.nsp
+*.xci
+*.nsz
+*.xcz
+*.keys
+**/extracted/
+**/exefs/
+**/romfs/
+**/save/
+**/generated/
+
+# Builds
+**/build/
+**/.gradle/
+**/dist/
+*.apk
+*.log
+__pycache__/
+
+# Binários pré-compilados sem fonte verificável (Arceuszada)
+engines/las-arceus/*.exe
+engines/las-arceus/*.dll
+engines/las-arceus/*.dll.a
+engines/las-arceus/lasgen/
+engines/las-arceus/zaimport/
+engines/las-arceus/zaprompts/
+engines/las-arceus/za_backup_orig/
+engines/las-arceus/zig/
+engines/las-arceus/logs/
+
+# Saídas de build .NET / Android local
+**/bin/Release/
+**/bin/Debug/
+**/obj/
+**/local.properties
+build-*.log

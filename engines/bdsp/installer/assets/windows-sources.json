@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "purpose": "Upstream projects the Windows components is built from; windows-components.yml resolves the newest release of each (scripts/recomp/resolve_inputs.py) and records revision, SHA-256 and size in the published archive.",
+  "maximum_archive_bytes": 40000000,
+  "sources": {
+    "vulkan-headers": {
+      "repository": "KhronosGroup/Vulkan-Headers",
+      "license": "Apache-2.0 OR MIT"
+    },
+    "vma": {
+      "repository": "GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator",
+      "license": "MIT"
+    },
+    "shaderc": {
+      "repository": "google/shaderc",
+      "license": "Apache-2.0"
+    },
+    "glslang": {
+      "repository": "KhronosGroup/glslang",
+      "license": "LicenseRef-glslang-source-notices"
+    },
+    "spirv-headers": {
+      "repository": "KhronosGroup/SPIRV-Headers",
+      "license": "MIT AND LicenseRef-SPIRV-Headers-source-notices"
+    },
+    "spirv-tools": {
+      "repository": "KhronosGroup/SPIRV-Tools",
+      "license": "Apache-2.0"
+    },
+    "ffmpeg": {
+      "repository": "FFmpeg/FFmpeg",
+      "license": "LicenseRef-FFmpeg-build-configuration"
+    },
+    "hactool": {
+      "repository": "SciresM/hactool",
+      "license": "ISC AND LicenseRef-bundled-mbedTLS"
+    }
+  }
+}

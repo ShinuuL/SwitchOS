@@ -1,0 +1,35 @@
+# Builds the Windows bundle (packaging/build_bundle.py): the desktop app, for a player who ports on a computer.
+#
+# The phone app is the other workflow's (android-apk.yml), and this line's release carries that one only.
+# This bundle is not built on a published release: it is built by hand when it is wanted (Actions -> this
+# workflow -> Run workflow), and it stays as the run's artifact.
+name: Windows release
+
+on:
+  workflow_dispatch:   # a build of the branch, kept as the run's artifact
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash   # PowerShell does not expand the zip's glob for gh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # the tags: git describe names the bundle
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'   # the Python the hand-built Windows zips shipped with
+      - run: python -m pip install -r requirements.txt pyinstaller
+      # after pip, which installs the prebuilt launcher: build_bundle.py refuses it (antivirus engines flag it); waf finds the runner's Visual Studio
+      - run: python packaging/build_bootloader.py
+      - run: python -m unittest discover tests
+      - run: python packaging/build_bundle.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nx2android-windows
+          path: dist/nx2android-*-windows-*.zip
