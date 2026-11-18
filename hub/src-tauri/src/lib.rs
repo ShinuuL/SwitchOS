@@ -3,6 +3,8 @@
 //! O hub não roda jogo nenhum: ele organiza as pastas e chama o runtime unificado (lasrecomp.exe, engines/las-za) e o
 //! importador (zaimport.exe). Configuração em %APPDATA%\SwitchOS\hub.json.
 
+mod party;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -117,6 +119,42 @@ struct GameState {
     mods: Vec<ModInfo>,
     /// ícone do jogo (extraído do Control NCA pelo zaimport) como data URL
     icon: Option<String>,
+    /// versão do jogo instalada (version.txt: DisplayVersion do Control NCA, gravado pelo zaimport)
+    version: Option<String>,
+    /// DLCs instaladas (<pasta do jogo>/aoc/<title id>.bin, lidas pelo serviço aoc:u do runtime)
+    dlcs: Vec<DlcInfo>,
+    /// o time do save (por enquanto só o Z-A: o leitor é o da tela inicial do ZA Recomp)
+    party: Vec<party::PartyMon>,
+}
+
+#[derive(Serialize)]
+struct DlcInfo {
+    title_id: String,
+    name: String,
+}
+
+fn dlc_name(tid: &str) -> String {
+    match tid {
+        "0100f43008c45001" => "Nintendo Switch 2 Edition".into(),
+        "0100f43008c45002" => "Mega Dimension".into(),
+        _ => "Conteúdo adicional".into(),
+    }
+}
+
+fn dlcs_in(dir: &Path) -> Vec<DlcInfo> {
+    let mut v: Vec<DlcInfo> = fs::read_dir(dir.join("aoc"))
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| {
+                    let n = e.file_name().to_string_lossy().to_lowercase();
+                    let tid = n.strip_suffix(".bin")?.to_string();
+                    Some(DlcInfo { name: dlc_name(&tid), title_id: tid })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort_by(|a, b| a.title_id.cmp(&b.title_id));
+    v
 }
 
 fn save_dir(cfg: &Config, g: &GameDef) -> PathBuf {
@@ -156,7 +194,7 @@ fn mods_for(cfg: &Config, g: &GameDef) -> Vec<ModInfo> {
     if let Ok(rd) = fs::read_dir(Path::new(&cfg.runtime_dir).join("mods")) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || !e.path().is_dir() {
+            if name.starts_with('.') || name.starts_with('_') || !e.path().is_dir() {
                 continue;
             }
             if let Some(r) = mod_romfs(&e.path(), g) {
@@ -190,6 +228,13 @@ fn list_games() -> Vec<GameState> {
                 save_dir: sd.to_string_lossy().into(),
                 save_modified,
                 mods: mods_for(&cfg, g),
+                version: fs::read_to_string(dir.join("version.txt")).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
+                dlcs: dlcs_in(&dir),
+                party: if g.key == "za" {
+                    party::load(&sd.join("main"), &Path::new(&cfg.runtime_dir).join("cache").join("party_icons"))
+                } else {
+                    vec![]
+                },
                 icon: fs::read(dir.join("icon.jpg")).ok().map(|b| {
                     use base64::Engine;
                     format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(b))

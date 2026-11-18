@@ -40,3 +40,4 @@ build-*.log
 hub/node_modules/
 hub/src-tauri/target/
 hub/src-tauri/gen/
+build-hub/

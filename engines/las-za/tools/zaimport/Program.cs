@@ -222,23 +222,38 @@ static int Run(string[] args)
 
     Directory.CreateDirectory(outDir);
 
-    // SwitchOS: a miniatura do hub = o ícone do próprio jogo (Control NCA; o do update ganha do base)
+    // SwitchOS: a miniatura e a versão do hub (icon.jpg, version.txt), do Control NCA. O do update tem o mesmo title id
+    // que o do base: vale o de maior DisplayVersion (control.nacp, 16 bytes em 0x3060).
     try
     {
-        foreach (var c in ncas.Where(t => t.nca.Header.ContentType == NcaContentType.Control && t.nca.Header.TitleId == TitleBase.Value)
-                              .Select(t => t.nca).OrderBy(n => n.Header.HasRightsId ? 1 : 0))
+        string best = ""; byte[]? bestIcon = null;
+        foreach (var c in ncas.Where(t => t.nca.Header.ContentType == NcaContentType.Control &&
+                                          (t.nca.Header.TitleId & ~0x800UL) == TitleBase.Value).Select(t => t.nca))
         {
             var cfs = c.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.None);
+            string ver = "";
+            using (var nf = new UniqueRef<IFile>())
+                if (cfs.OpenFile(ref nf.Ref, "/control.nacp".ToU8Span(), OpenMode.Read).IsSuccess())
+                {
+                    var v = new byte[16];
+                    nf.Get.Read(out _, 0x3060, v).ThrowIfFailure();
+                    ver = Encoding.ASCII.GetString(v).Split((char)0)[0];
+                }
+            if (bestIcon != null && !(Version.TryParse(ver, out var nv) && Version.TryParse(best, out var bv) && nv > bv)) continue;
             var icon = cfs.EnumerateEntries("/", "icon_*.dat").OrderBy(e => e.Name == "icon_AmericanEnglish.dat" ? 0 : 1).FirstOrDefault();
             if (icon == null) continue;
             using var f = new UniqueRef<IFile>();
             cfs.OpenFile(ref f.Ref, icon.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
             f.Get.GetSize(out long sz).ThrowIfFailure();
-            var buf = new byte[sz];
-            f.Get.Read(out _, 0, buf).ThrowIfFailure();
-            File.WriteAllBytes(Path.Combine(outDir, "icon.jpg"), buf);
-            Console.WriteLine($"icon: {icon.Name}");
-            break;
+            bestIcon = new byte[sz];
+            f.Get.Read(out _, 0, bestIcon).ThrowIfFailure();
+            best = ver;
+        }
+        if (bestIcon != null)
+        {
+            File.WriteAllBytes(Path.Combine(outDir, "icon.jpg"), bestIcon);
+            File.WriteAllText(Path.Combine(outDir, "version.txt"), best);
+            Console.WriteLine($"icon / version: {best}");
         }
     }
     catch (Exception e) { Console.WriteLine($"icon: skipped ({e.Message})"); }

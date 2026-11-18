@@ -15,6 +15,8 @@ let pollTimer = null;
 const initials = (name) =>
   name.replace(/^Pokémon( Legends:)?\s*/i, "").replace(/^Zelda:\s*/, "").split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
 
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
 function fmtDate(secs) {
   return new Date(secs * 1000).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
 }
@@ -64,6 +66,8 @@ function renderGame(g) {
   $("[data-name]", node).textContent = g.name;
   $("[data-chips]", node).innerHTML =
     `<span class="chip ${s.cls}">${s.text}</span>` +
+    (g.version ? `<span class="chip">v${esc(g.version)}</span>` : "") +
+    (g.dlcs.length ? `<span class="chip ok">DLC</span>` : "") +
     (g.mods.length ? `<span class="chip">${g.mods.length} mod${g.mods.length > 1 ? "s" : ""}</span>` : "") +
     (g.save_modified ? `<span class="chip">Save: ${fmtDate(g.save_modified)}</span>` : "");
 
@@ -81,6 +85,26 @@ function renderGame(g) {
     ? "Este jogo ainda tem runtime próprio (engines/). A integração ao hub vem nas próximas versões."
     : !g.built ? "Importe o jogo abaixo para liberar o Jogar." : "No jogo: F1 abre as configurações gráficas e de controles.";
   $("[data-folder]", node).onclick = () => openPath(g.dir).catch(() => alert("A pasta do jogo ainda não existe."));
+
+  // versão e DLC
+  $("[data-version]", node).innerHTML = g.version
+    ? `<span class="chip ok">${esc(g.version)}</span>`
+    : `<span class="muted">${g.imported ? "Desconhecida (importe de novo para ler)" : "Jogo não importado"}</span>`;
+  $("[data-dlc]", node).innerHTML = g.dlcs.length
+    ? g.dlcs.map((d) => `<span class="chip ok" title="${d.title_id}">${esc(d.name)} instalada</span>`).join(" ")
+    : `<span class="muted">Nenhuma instalada</span>`;
+
+  // time do save (Z-A)
+  if (g.party.length) {
+    $("[data-team]", node).hidden = false;
+    $("[data-team-cards]", node).innerHTML = g.party.map((m) => `
+      <div class="mon${m.shiny ? " shiny" : ""}">
+        ${m.icon ? `<img src="${m.icon}" alt="">` : `<span class="ball"></span>`}
+        ${m.shiny ? `<span class="star" title="Shiny">★</span>` : ""}
+        <strong>${esc(m.egg ? "Ovo" : m.name)}</strong>
+        <small>${m.egg ? "" : `Nv. ${m.level}`}</small>
+      </div>`).join("");
+  }
 
   // importar
   const files = $("[data-files]", node);
