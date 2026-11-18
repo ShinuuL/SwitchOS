@@ -35,3 +35,8 @@ engines/las-arceus/logs/
 **/obj/
 **/local.properties
 build-*.log
+
+# Hub (Tauri)
+hub/node_modules/
+hub/src-tauri/target/
+hub/src-tauri/gen/

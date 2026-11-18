@@ -10,7 +10,6 @@
 #include <strings.h>
 #include <sys/stat.h>
 
-#define TITLE_ID "0100F43008C44000"  // Pokémon Legends: Z-A
 
 static bool is_dir(const char *p) {
     struct stat sb;
@@ -38,10 +37,20 @@ static bool at(const char *base, const char *const *parts, char *out, size_t n) 
     return is_dir(cur);
 }
 
+// SwitchOS: the game being played (kernel.c, from exefs/main.npdm; Link's Awakening's until a game is loaded - the start
+// screen's mod list, Z-A's hub). Z-A keeps every layout it had; any other game (Arceus...) takes a mod only from a folder
+// named with its own title id (atmosphere/contents/<id>/, contents/<id>/, <id>/: how Switch mods ship), so one game's
+// mods in the shared mods/ never reach another - a bare romfs/ stays Z-A's.
+extern uint64_t g_program_id;
+static bool is_za(void) { return g_program_id == 0x0100F43008C44000ull || g_program_id == 0x01006BB00C6F0000ull; }
+
 static bool at_roots(const char *base, const char *leaf, char *out, size_t n) {
-    const char *roots[][5] = {{leaf, NULL}, {"atmosphere", "contents", TITLE_ID, leaf, NULL},
-                              {"contents", TITLE_ID, leaf, NULL}, {TITLE_ID, leaf, NULL}};
-    for (size_t i = 0; i < sizeof roots / sizeof *roots; i++)
+    char tid[17];
+    snprintf(tid, sizeof tid, "%016llX", (unsigned long long)(is_za() ? 0x0100F43008C44000ull : g_program_id));
+    const char *roots[][5] = {{"atmosphere", "contents", tid, leaf, NULL}, {"contents", tid, leaf, NULL},
+                              {tid, leaf, NULL}, {leaf, NULL}};
+    size_t nroots = sizeof roots / sizeof *roots - (is_za() ? 0 : 1);  // (a bare leaf: Z-A only)
+    for (size_t i = 0; i < nroots; i++)
         if (at(base, roots[i], out, n)) return true;
     return false;
 }

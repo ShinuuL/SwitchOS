@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SwitchOS Hub</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="main.js" defer></script>
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">S</span>
+        <div>
+          <strong>SwitchOS</strong>
+          <small>Hub 0.0.1</small>
+        </div>
+      </div>
+      <nav class="library" id="library" aria-label="Biblioteca"></nav>
+      <button class="nav-settings" id="open-settings" type="button">Configurações</button>
+    </aside>
+
+    <main class="content" id="content" aria-live="polite"></main>
+
+    <template id="tpl-game">
+      <section class="game">
+        <header class="hero">
+          <div class="hero-art" data-art></div>
+          <div class="hero-info">
+            <p class="eyebrow" data-tid></p>
+            <h1 data-name></h1>
+            <div class="chips" data-chips></div>
+            <div class="actions">
+              <button class="btn primary" data-play type="button">Jogar</button>
+              <button class="btn" data-folder type="button">Abrir pasta do jogo</button>
+            </div>
+            <p class="hint" data-hint></p>
+          </div>
+        </header>
+
+        <div class="panels">
+          <article class="panel">
+            <h2>Importar jogo</h2>
+            <p class="muted">Escolha o NSP/XCI do jogo base e da atualização. O hub extrai com o seu <code>prod.keys</code> e compila o código do jogo neste PC.</p>
+            <ul class="files" data-files></ul>
+            <div class="row">
+              <button class="btn" data-pick type="button">Escolher arquivos…</button>
+              <button class="btn primary" data-import type="button" disabled>Importar e compilar</button>
+            </div>
+            <div class="job" data-job hidden>
+              <div class="job-step" data-step></div>
+              <div class="bar"><span data-bar></span></div>
+              <pre class="job-log" data-log></pre>
+            </div>
+          </article>
+
+          <article class="panel">
+            <h2>Mods</h2>
+            <p class="muted">Pastas em <code>mods/</code> com o title id deste jogo (formato do Atmosphère: <code>&lt;title id&gt;/romfs</code>).</p>
+            <ul class="mods" data-mods></ul>
+            <button class="btn" data-mods-folder type="button">Abrir pasta de mods</button>
+          </article>
+
+          <article class="panel">
+            <h2>Save</h2>
+            <p data-save></p>
+            <button class="btn" data-save-folder type="button">Abrir pasta do save</button>
+          </article>
+        </div>
+      </section>
+    </template>
+
+    <template id="tpl-settings">
+      <section class="settings">
+        <h1>Configurações</h1>
+        <form id="settings-form">
+          <label>
+            <span>Pasta do runtime</span>
+            <small>Onde está o <code>lasrecomp.exe</code>. Também guarda saves, mods e logs.</small>
+            <div class="row"><input name="runtime_dir" required /><button class="btn" type="button" data-browse="runtime_dir">…</button></div>
+          </label>
+          <label>
+            <span>Pasta dos jogos</span>
+            <small>Cada jogo importado vai para uma subpasta aqui (fora do repositório).</small>
+            <div class="row"><input name="games_dir" required /><button class="btn" type="button" data-browse="games_dir">…</button></div>
+          </label>
+          <label>
+            <span>prod.keys</span>
+            <small>Chaves extraídas do seu Switch (Lockpick_RCM). O <code>title.keys</code> ao lado é usado se existir.</small>
+            <div class="row"><input name="keys_path" required /><button class="btn" type="button" data-browse-file="keys_path">…</button></div>
+          </label>
+          <div class="row end">
+            <span class="saved" id="saved" hidden>Salvo</span>
+            <button class="btn primary" type="submit">Salvar</button>
+          </div>
+        </form>
+      </section>
+    </template>
+  </body>
+</html>
