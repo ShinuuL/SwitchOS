@@ -82,10 +82,12 @@ static int Run(string[] args)
 {
     string? titleKeys = null;  // (--title-keys: the launcher found it by its contents, whatever its name)
     bool noKeys = false;       // (--no-keys: a .nup-only import; the start screen passes this)
+    bool iconOnly = false;     // SwitchOS (--icon-only: só extrai o icon.jpg, para o hub)
     while (args.Length > 0)
     {
         if (args[0] == "--title-keys" && args.Length >= 2) (titleKeys, args) = (args[1], args[2..]);
         else if (args[0] == "--no-keys") (noKeys, args) = (true, args[1..]);
+        else if (args[0] == "--icon-only") (iconOnly, args) = (true, args[1..]);
         else break;
     }
     string keysPath = "", outDir;
@@ -210,7 +212,7 @@ static int Run(string[] args)
     }
     bool useNup = nupBase != null || nupUpdate != null;
     if (!useNup && base_ == null)
-        return Fail(ncas.Count == 0 && nups.Count == 0 ? "no game packages found" : "the base game of Pokémon Legends Z-A isn't among these files");
+        return Fail(ncas.Count == 0 && nups.Count == 0 ? "no game packages found" : $"the base game ({TitleBase.Value:x16}) isn't among these files");
     if (useNup && (base_ != null || upd != null))
         Console.WriteLine("note: using the .nup's base/update; the .nsp/.xci base/update in this folder is ignored");
     foreach (var n in new[] { base_, upd }.Concat(dlcs))
@@ -219,6 +221,28 @@ static int Run(string[] args)
                         "the game files (packages without their ticket need it)");
 
     Directory.CreateDirectory(outDir);
+
+    // SwitchOS: a miniatura do hub = o ícone do próprio jogo (Control NCA; o do update ganha do base)
+    try
+    {
+        foreach (var c in ncas.Where(t => t.nca.Header.ContentType == NcaContentType.Control && t.nca.Header.TitleId == TitleBase.Value)
+                              .Select(t => t.nca).OrderBy(n => n.Header.HasRightsId ? 1 : 0))
+        {
+            var cfs = c.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.None);
+            var icon = cfs.EnumerateEntries("/", "icon_*.dat").OrderBy(e => e.Name == "icon_AmericanEnglish.dat" ? 0 : 1).FirstOrDefault();
+            if (icon == null) continue;
+            using var f = new UniqueRef<IFile>();
+            cfs.OpenFile(ref f.Ref, icon.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+            f.Get.GetSize(out long sz).ThrowIfFailure();
+            var buf = new byte[sz];
+            f.Get.Read(out _, 0, buf).ThrowIfFailure();
+            File.WriteAllBytes(Path.Combine(outDir, "icon.jpg"), buf);
+            Console.WriteLine($"icon: {icon.Name}");
+            break;
+        }
+    }
+    catch (Exception e) { Console.WriteLine($"icon: skipped ({e.Message})"); }
+    if (iconOnly) return 0;
 
     // The add-ons: an .nsp's DLC is an NCA data section; a .nup's is a plain tree that has to be put back into a RomFS
     // image. The Switch 2 Edition's upgrade pack (0100f43008c45001) is a 0-byte dummy in the .nup, but the game's aoc

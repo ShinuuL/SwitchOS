@@ -65,6 +65,11 @@ static bool find_leaf(const char *mod_dir, const char *leaf, char *out, size_t n
     for (struct dirent *e; (e = readdir(d));) {
         if (e->d_name[0] == '.' || !strcasecmp(e->d_name, "__MACOSX")) continue;
         snprintf(p, sizeof p, "%s/%s", mod_dir, e->d_name);
+        // SwitchOS: a folder named with another game's title id is that game's mod, never this one's
+        if (strlen(e->d_name) == 16 && strspn(e->d_name, "0123456789abcdefABCDEF") == 16) {
+            unsigned long long id = strtoull(e->d_name, NULL, 16);
+            if (id != (is_za() ? 0x0100F43008C44000ull : g_program_id)) continue;
+        }
         if (is_dir(p) && subs++ == 0) snprintf(only, sizeof only, "%s", p);
     }
     closedir(d);

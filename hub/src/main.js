@@ -40,7 +40,7 @@ function renderLibrary() {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "lib-item" + (g.key === current ? " active" : "");
-    b.innerHTML = `<span class="tile" style="--c:${g.color}">${initials(g.name)}</span>
+    b.innerHTML = `<span class="tile" style="--c:${g.color}">${g.icon ? `<img src="${g.icon}" alt="">` : initials(g.name)}</span>
       <span class="lib-text"><strong>${g.name}</strong><small class="st ${s.cls}">${s.text}</small></span>`;
     b.onclick = () => select(g.key);
     library.appendChild(b);
@@ -58,7 +58,8 @@ function renderGame(g) {
   const node = $("#tpl-game").content.cloneNode(true);
   const s = status(g);
   $("[data-art]", node).style.setProperty("--c", g.color);
-  $("[data-art]", node).textContent = initials(g.name);
+  if (g.icon) $("[data-art]", node).innerHTML = `<img src="${g.icon}" alt="">`;
+  else $("[data-art]", node).textContent = initials(g.name);
   $("[data-tid]", node).textContent = g.title_id;
   $("[data-name]", node).textContent = g.name;
   $("[data-chips]", node).innerHTML =

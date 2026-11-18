@@ -115,6 +115,8 @@ struct GameState {
     save_dir: String,
     save_modified: Option<u64>,
     mods: Vec<ModInfo>,
+    /// ícone do jogo (extraído do Control NCA pelo zaimport) como data URL
+    icon: Option<String>,
 }
 
 fn save_dir(cfg: &Config, g: &GameDef) -> PathBuf {
@@ -188,6 +190,10 @@ fn list_games() -> Vec<GameState> {
                 save_dir: sd.to_string_lossy().into(),
                 save_modified,
                 mods: mods_for(&cfg, g),
+                icon: fs::read(dir.join("icon.jpg")).ok().map(|b| {
+                    use base64::Engine;
+                    format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(b))
+                }),
             }
         })
         .collect()
