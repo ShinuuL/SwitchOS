@@ -20,7 +20,8 @@ Trazer para o hub o que hoje só a tela do ZA Recomp faz:
 
 - [x] `zaimport --probe`: lista o jogo de cada pacote sem extrair (`probe<TAB>pacote<TAB>title id base<TAB>base|update|dlc`). Falta o hub usar.
 - [x] `switchos.py backups <jogo>` e `switchos.py restore <jogo> <backup|latest>`: o save atual vira backup `*-pre-restore` antes. Falta o botão no hub chamar.
-- [ ] Time do save do Arceus (o formato do save é diferente do Z-A).
+- [ ] Time do save do Arceus. Protótipo pronto (`scratchpad/pla_party.py`): mesma criptografia do Z-A, time no bloco `0x2985FE5D` (6 slots de 0x178 + contagem), caixas no `0x47E1CEAB` (960 slots de 0x168); decodificação e checksum PA8 conferidos. Falta um save com Pokémon para confirmar os offsets de espécie, nível e apelido, e então portar para `party.rs`.
+- [ ] **Verificar:** o save do Arceus no PC (gravado em 17/11 às 20:43) tem o treinador "Shinuu" mas nenhum Pokémon (time 0, caixas 0). Ou é de antes do inicial, ou o progresso de depois não está sendo gravado.
 - [ ] Ligar e desligar mods pelo hub (prefixo `_` ou `mods_off` do runtime).
 - [ ] Mostrar quando um mod traz `arc/data.trpfd` próprio e oferecer remover. A tradução parcial do Z-A derrubava o jogo por causa disso. O original está em `ZA Recomp/mods-originals/`.
 
@@ -56,4 +57,4 @@ Dumps no celular: `/sdcard/SwitchOS/`. Envios grandes (vários GB) derrubam o AD
 
 ## Ambiente
 
-- [ ] Build do DX12 (Dozen): o meson falha porque o TEMP aponta para `C:\WINDOWS`. Hoje o DX12 é opcional.
+- [ ] Build do DX12 (Dozen), opcional: com TEMP/TMP/TMPDIR certos o `cc` funciona direto, mas chamado pelo meson ainda tenta `C:\WINDOWS\` e sai com `0xC0000409`. O meson passa outro ambiente ao compilador; investigar (arquivo nativo do meson com `[properties]` ou `[binaries]`, ou rodar fora do Git Bash, num shell UCRT64 puro).
