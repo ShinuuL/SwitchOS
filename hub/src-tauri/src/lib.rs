@@ -990,6 +990,18 @@ mod restore_tests {
         d
     }
 
+    /// Restauração de verdade, para conferir junto com o switchos.py num ambiente isolado:
+    /// RESTORE_E2E_BDIR (pasta backups/<TID>), RESTORE_E2E_NAME (cópia) e RESTORE_E2E_SAVE (pasta save_0).
+    /// Sem as variáveis, não faz nada. Nunca apontar para o save real.
+    #[test]
+    fn restore_e2e() {
+        let (Ok(b), Ok(n), Ok(s)) = (std::env::var("RESTORE_E2E_BDIR"), std::env::var("RESTORE_E2E_NAME"), std::env::var("RESTORE_E2E_SAVE")) else {
+            return;
+        };
+        let created = restore_into(Path::new(&b), &n, Path::new(&s), 10, &local_stamp()).unwrap();
+        println!("restaurado {n}; save anterior em {created:?}");
+    }
+
     #[test]
     fn names() {
         assert!(valid_backup_name("20261118-153000-pc"));
