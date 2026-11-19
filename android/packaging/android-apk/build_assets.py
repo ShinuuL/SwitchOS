@@ -40,6 +40,20 @@ NUGET = [('LibHac', '0.19.0')]
 PROFILE_DIR = re.compile(r'^[0-9A-F]{16}$')
 
 
+
+def file_mode(p):
+    """The file's mode for modes.json. On Windows (SwitchOS builds the APK there) the file system keeps no
+    executable bit - every file reads 0o666 - so the mode comes from the contents: an ELF or a #! script is 0o755,
+    the rest 0o644 (a Linux build keeps the real mode)."""
+    if os.name != 'nt':
+        return p.stat().st_mode & 0o777
+    try:
+        with open(p, 'rb') as f:
+            head = f.read(4)
+    except OSError:
+        return 0o644
+    return 0o755 if head == b'ELF' or head[:2] == b'#!' else 0o644
+
 def copy_tree(src: Path, dst: Path, skip=SKIP_DIRS):
     """Copies a tree, leaving out what the phone does not need"""
     for p in sorted(src.rglob('*')):
@@ -253,7 +267,7 @@ def finalize_metadata(out):
         if not root.exists(): continue
         for p in root.rglob('*'):
             if p.is_file():
-                modes[f'{tree}/{p.relative_to(root)}'] = p.stat().st_mode & 0o777
+                modes[f'{tree}/{p.relative_to(root).as_posix()}'] = file_mode(p)
     (out / 'modes.json').write_text(json.dumps(modes))
     print(f'>> the modes of {len(modes)} file(s)')
 
@@ -265,10 +279,12 @@ def finalize_metadata(out):
         if not root.exists(): continue
         for p in sorted(root.rglob('*')):
             if p.is_file():
-                stamp.update(f'{tree}/{p.relative_to(root)}:{p.stat().st_size}\n'.encode())
+                stamp.update(f'{tree}/{p.relative_to(root).as_posix()}:{p.stat().st_size}\n'.encode())
                 with p.open('rb') as source:
                     for chunk in iter(lambda: source.read(1024 * 1024), b''):
                         stamp.update(chunk)
+    # (the modes too: a build that only fixes a permission must reach the phones that have the tree - SwitchOS)
+    if (out / 'modes.json').is_file(): stamp.update((out / 'modes.json').read_bytes())
     (out / 'build-id').write_text(stamp.hexdigest() + '\n')
 
 

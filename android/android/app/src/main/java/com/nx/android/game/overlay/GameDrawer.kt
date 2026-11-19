@@ -136,6 +136,8 @@ fun GameDrawer(
     onOpenChange: (Boolean) -> Unit,
     settings: FrameGenSettings?,
     onRatePin: (RatePin) -> Unit,
+    panel30: () -> Boolean = { false },
+    onPanel30: (Boolean) -> Unit = {},
     motion: () -> Int,
     motionHasGyro: Boolean,
     onMotion: (Boolean, Boolean) -> Unit,
@@ -236,7 +238,7 @@ fun GameDrawer(
                                 when (DrawerTab.entries[tab]) {
                                     // 性能页：帧率档位、GPU 提频与底座模式（都是性能取舍，与帧生成无关）
                                     DrawerTab.PERF -> PerfRows(ratePin, onRatePin, rateSupported,
-                                        turboSupported, turboMode, { mode -> turboMode = mode; Native.gpuTurboSet(mode) })
+                                        turboSupported, turboMode, { mode -> turboMode = mode; Native.gpuTurboSet(mode) }, panel30, onPanel30)
                                     DrawerTab.HUD -> HudRows(hudStats, onHudStats, hudDevice, onHudDevice,
                                         hudFields, onHudFields, hudFahrenheit, onHudFahrenheit)
                                     DrawerTab.FRAMEGEN -> if (settings == null) HintRow(stringResource(R.string.drawer_no_framegen))
@@ -512,7 +514,8 @@ private fun HudRows(
  */
 @Composable
 private fun PerfRows(pin: Int, onPick: (RatePin) -> Unit, rateSupported: Boolean,
-                      turboSupported: Boolean, turboMode: String, onTurbo: (String) -> Unit) {
+                      turboSupported: Boolean, turboMode: String, onTurbo: (String) -> Unit,
+                      panel30: () -> Boolean = { false }, onPanel30: (Boolean) -> Unit = {}) {
     if (rateSupported) {
         GroupLabel(stringResource(R.string.drawer_group_rate))
         // 选项的词先取好：回调里不能取词
@@ -541,6 +544,11 @@ private fun PerfRows(pin: Int, onPick: (RatePin) -> Unit, rateSupported: Boolean
     var docked by remember { mutableStateOf(Native.menuGet(4) != 0) }
     ToggleRow(Icons.Filled.Tv, stringResource(R.string.drawer_docked), stringResource(R.string.drawer_docked_hint), docked) {
         docked = it; Native.menuSet(4, if (it) 1.0 else 0.0)
+    }
+    // SwitchOS: the panel held at 30 Hz (off by default: a game near its frame budget loses frames to it)
+    var hold30 by remember { mutableStateOf(panel30()) }
+    ToggleRow(Icons.Filled.Speed, stringResource(R.string.drawer_panel30), stringResource(R.string.drawer_panel30_hint), hold30) {
+        hold30 = it; onPanel30(it)
     }
 }
 

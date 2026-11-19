@@ -19,6 +19,7 @@ that is kept is needed by a program that runs, and every library a program needs
 The rootfs is read as the tarball it is (the payload holds it as one), twice: once to see what is in it, once to
 write what stays. Nothing is unpacked on the way, so the build needs no room for a gigabyte.
 """
+import posixpath  # (the paths inside the tarball are POSIX on every host: ntpath broke the links on Windows)
 import argparse, json, os, struct, sys, tarfile
 from pathlib import Path
 
@@ -211,7 +212,7 @@ class Rootfs:
             target = m.linkname
             if target.startswith('/'):
                 return None
-            path = os.path.normpath(os.path.join(os.path.dirname(path), target))
+            path = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
             m = self.members.get(path)
             seen += 1
         return m
@@ -222,7 +223,7 @@ class Rootfs:
         where they come from), but first in the tree they are in."""
         outside = origin in self.ext
         for d in search:
-            if outside and d == os.path.dirname(origin):
+            if outside and d == posixpath.dirname(origin):
                 if (self.ext_dir / d / name).is_file():
                     return (False, d + '/' + name)
                 continue
@@ -248,12 +249,12 @@ class Rootfs:
                 if not part:
                     continue
                 if part.startswith('$ORIGIN'):
-                    base = os.path.dirname(origin)
+                    base = posixpath.dirname(origin)
                     part = (base + part[len('$ORIGIN'):]).replace('//', '/')
                 if part.startswith('/'):
                     part = part[1:]
                 if origin in self.ext:
-                    part = str(Path(self.ext_dir / part).relative_to(self.ext_dir))
+                    part = Path(self.ext_dir / part).relative_to(self.ext_dir).as_posix()
                 if part and part not in out:
                     out.append(part)
         return out
@@ -275,7 +276,7 @@ class Rootfs:
             path = queue.pop()
             m = self._needed_of(path)
             needed = m.needed if m else []
-            search = [os.path.dirname(path)] + LIB_DIRS
+            search = [posixpath.dirname(path)] + LIB_DIRS
             for name in needed:
                 found = self._resolve(name, path, search)
                 if found is None:
@@ -326,10 +327,10 @@ class Rootfs:
         for path in list(ROOTS) + list(self.ext):
             needed = self._needed_of(path)
             for name in (needed.needed if needed else []):
-                if not self._resolve(name, path, [os.path.dirname(path)] + LIB_DIRS):
+                if not self._resolve(name, path, [posixpath.dirname(path)] + LIB_DIRS):
                     broken.append((path, name))
                     continue
-                found = self._resolve(name, path, [os.path.dirname(path)] + LIB_DIRS)
+                found = self._resolve(name, path, [posixpath.dirname(path)] + LIB_DIRS)
                 in_rootfs, lib = found
                 if in_rootfs and lib not in self.keep:
                     broken.append((path, name))
@@ -344,7 +345,7 @@ class Rootfs:
             target = self.members[link].linkname
             if target.startswith('/'):
                 continue      # an absolute link points outside the rootfs: the guest is not a chroot
-            rel = os.path.normpath(os.path.join(os.path.dirname(link), target))
+            rel = posixpath.normpath(posixpath.join(posixpath.dirname(link), target))
             if rel not in self.keep:
                 self.keep.add(rel)
                 m = self.members.get(rel)

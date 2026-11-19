@@ -57,7 +57,15 @@ class Env @Inject constructor(@ApplicationContext private val ctx: Context, priv
 
     /** The environment is ready when the rootfs, the tool and the compiler are there */
     override val ready: Boolean
-        get() = python.exists() && File(tool, "porter").isDirectory && File(tool, "toolchain/clang/bin/clang").exists()
+        get() = python.exists() && File(tool, "porter").isDirectory && File(tool, "toolchain/clang/bin/clang").exists() &&
+            rootfsCurrent()
+
+    /** SwitchOS: the unpacked rootfs is this APK's (an older APK's, maybe broken, has to be prepared again) */
+    private fun rootfsCurrent(): Boolean {
+        val stamp = rootfsStamp()
+        val mark = File(files, ".nx2a-rootfs")
+        return stamp.isEmpty() || (mark.exists() && mark.readText().trim() == stamp)
+    }
 
     /** The .NET runtime (the extractor and the shader translator are C# and run on it): where the porter looks for it */
     val dotnet: File get() = File(nxHome, "toolchains/dotnet/dotnet")
@@ -136,6 +144,15 @@ class Env @Inject constructor(@ApplicationContext private val ctx: Context, priv
 
     private fun unpackNow(onStep: (String) -> Unit, rootfsFinished: () -> Unit) {
         fun step(s: String) { Log.i(TAG, "step: $s"); onStep(s) }
+        // SwitchOS: the rootfs unpacked from another APK's rootfs.pkg goes and comes again (a broken one - a
+        // library left out of the trim - would otherwise stay forever: the Python is there, so it was never redone)
+        val rootfsMark = File(files, ".nx2a-rootfs")
+        val rootfsStamp = rootfsStamp()
+        if (python.exists() && rootfsStamp.isNotEmpty() && (!rootfsMark.exists() || rootfsMark.readText().trim() != rootfsStamp)) {
+            Log.i(TAG, "the rootfs is from another build: it goes and comes again")
+            rootfs.deleteRecursively()
+            marker.delete()
+        }
         // The environment is already there (the app was updated, not reinstalled): only the check.
         if (ready && dotnet.exists() && marker.exists()) {
             // the environment is already there: only the tool's own scripts and the interpreter paths are new
@@ -152,6 +169,7 @@ class Env @Inject constructor(@ApplicationContext private val ctx: Context, priv
                 GZIPInputStream(raw).use { gz -> Tar.unpack(gz, rootfs) }
             }
             rootfsFinished()
+            if (rootfsStamp.isNotEmpty()) rootfsMark.writeText(rootfsStamp)
         }
         if (!File(files, ".nx2a-tool").exists()) {
             step("the tool")
@@ -335,6 +353,13 @@ class Env @Inject constructor(@ApplicationContext private val ctx: Context, priv
         if (raw.isEmpty()) "" else "$STAMP_GEN$raw"
     } catch (e: Exception) {
         ""
+    }
+
+    /** SwitchOS: the rootfs.pkg in this APK (stored uncompressed: its length tells one build's from another's) */
+    private fun rootfsStamp(): String = try {
+        ctx.assets.openFd("rootfs.pkg").use { it.length.toString() }
+    } catch (e: Exception) {
+        try { ctx.assets.open("rootfs.pkg").use { it.available().toString() } } catch (e2: Exception) { "" }
     }
 
     /** The stamp the tree was unpacked with */

@@ -655,4 +655,6 @@
     <string name="faq_github_name">nx2androidX · GitHub</string>
     <string name="faq_github_hint">The source repository. Open an issue when something does not work, and paste the log into it.</string>
     <string name="faq_github_action">Report an issue</string>
+    <string name="drawer_panel30">Hold the screen at 30 Hz</string>
+    <string name="drawer_panel30_hint">Saves a little power in a 30 fps game with time to spare. A game near its limit loses frames: leave it off when the fps counter drops.</string>
 </resources>

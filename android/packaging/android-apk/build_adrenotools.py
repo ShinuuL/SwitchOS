@@ -63,9 +63,11 @@ def main():
     bin_ = ndk / 'toolchains' / 'llvm' / 'prebuilt' / ('darwin-x86_64' if sys.platform == 'darwin' else 'linux-x86_64') / 'bin'
     if not (bin_ / 'clang++').is_file():
         for host in sorted(p.name for p in (ndk / 'toolchains' / 'llvm' / 'prebuilt').iterdir()):
-            if (ndk / 'toolchains' / 'llvm' / 'prebuilt' / host / 'bin' / 'clang++').is_file():
+            if any((ndk / 'toolchains' / 'llvm' / 'prebuilt' / host / 'bin' / c).is_file() for c in ('clang++', 'clang++.exe')):
                 bin_ = ndk / 'toolchains' / 'llvm' / 'prebuilt' / host / 'bin'; break
-    cxx = str(bin_ / 'clang++')
+    # (Windows: the NDK's driver is clang++.exe - SwitchOS builds the APK there)
+    if not (bin_ / 'clang++').is_file() and (bin_ / 'clang++.exe').is_file(): cxx = str(bin_ / 'clang++.exe')
+    else: cxx = str(bin_ / 'clang++')
     if not Path(cxx).is_file():
         print(f'>> no clang++ in {bin_}: the driver loader is not built (a driver the player imports will not load)')
         return 1

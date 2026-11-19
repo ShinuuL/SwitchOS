@@ -158,6 +158,7 @@ class GameActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var motionSettings: MotionSettings? = null
     private var padPlayers: PadPlayers? = null
     private var packPath: String? = null
+    private var gameSurface: android.view.Surface? = null   // SwitchOS: the game's surface, for its display frame rate (applyDisplayRate)
     private var packTitleId: String? = null
     private var packName: String = ""
 
@@ -608,6 +609,39 @@ class GameActivity : ComponentActivity(), SurfaceHolder.Callback {
     private fun saveRatePin(pin: RatePin) {
         rateSettings?.save(pin)
         runCatching { Native.perfPinSet(pin.fps) }
+        applyDisplayRate()
+    }
+
+    /**
+     * SwitchOS: a game that runs at 30 fps holds the panel at 30 Hz. Left alone, the panel jumps to 60 Hz on every
+     * touch of the on-screen pad and back to 30 a second later (seen on a Galaxy M55: dozens of mode switches a
+     * minute) - power and heat for frames the game never makes. Held only when the game is known to run at 30: the
+     * player's pin is 30, or it follows the game (none / 0) and the port did not lift the frame rate (no
+     * DM_FPS_TARGET=60 / DM_FPS_CEILING=0 row in env.txt). A pin of 40 or 60 lets the panel go (FRAME_RATE 0 = no vote).
+     */
+    /** The player's choice for this game, off by default (the drawer's "Hold the screen at 30 Hz"): a game a hair over its 33 ms budget would wait a whole 30 Hz vsync. On the Galaxy M55 the Arceus title over the beach read 23 fps with and without it - the scene, not the hold. */
+    private fun panel30On(): Boolean = packTitleId?.let { PrefsStore(this).bool("panel30.${it.lowercase()}") } ?: false
+
+    private fun applyDisplayRate() {
+        val s = gameSurface ?: return
+        if (android.os.Build.VERSION.SDK_INT < 30 || !s.isValid) return
+        val pin = rateSettings?.load()?.fps
+        val lifted = packPath?.let { p ->
+            runCatching { java.io.File(p, "env.txt").readLines() }.getOrDefault(emptyList())
+                .any { it.trim() == "DM_FPS_TARGET=60" || it.trim() == "DM_FPS_CEILING=0" }
+        } ?: false
+        val hold30 = panel30On() && (pin == 30 || ((pin == null || pin == 0) && !lifted))
+        runCatching {
+            s.setFrameRate(if (hold30) 30f else 0f, android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+        }
+        // The surface's vote alone loses to the window's touch boost (SurfaceFlinger showed the activity's layer at
+        // "HighHint" on every touch, the panel still flipping to 60): Android 15+ lets a window turn the boost off.
+        runCatching {
+            val lp = window.attributes
+            lp.preferredRefreshRate = if (hold30) 30f else 0f
+            if (android.os.Build.VERSION.SDK_INT >= 35) lp.setFrameRateBoostOnTouchEnabled(!hold30)
+            window.attributes = lp
+        }
     }
 
     /** 宿主现在的体感开关（位 1 = 体感开着，位 2 = 保留甩动方向）：宿主是唯一真源 */
@@ -701,6 +735,8 @@ class GameActivity : ComponentActivity(), SurfaceHolder.Callback {
                 onOpenChange = { drawerOpen = it },
                 settings = fgSettings,
                 onRatePin = { saveRatePin(it) },
+                panel30 = { panel30On() },
+                onPanel30 = { on -> packTitleId?.let { PrefsStore(this@GameActivity).put("panel30.${it.lowercase()}", on) }; applyDisplayRate() },
                 motion = { motionState() },
                 motionHasGyro = hasGyroscope(this@GameActivity),
                 onMotion = { on, raw -> saveMotion(on, raw) },
@@ -772,9 +808,9 @@ class GameActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     // ---- the surface: the window passes over owned, and dropping it destroys the swapchain before it returns ----
-    override fun surfaceCreated(h: SurfaceHolder) { Native.setSurface(h.surface); padView.fetchLayout() }
-    override fun surfaceChanged(h: SurfaceHolder, format: Int, width: Int, height: Int) { Native.setSurface(h.surface); padView.fetchLayout() }
-    override fun surfaceDestroyed(h: SurfaceHolder) = Native.setSurface(null)
+    override fun surfaceCreated(h: SurfaceHolder) { Native.setSurface(h.surface); padView.fetchLayout(); gameSurface = h.surface; applyDisplayRate() }
+    override fun surfaceChanged(h: SurfaceHolder, format: Int, width: Int, height: Int) { Native.setSurface(h.surface); padView.fetchLayout(); gameSurface = h.surface; applyDisplayRate() }
+    override fun surfaceDestroyed(h: SurfaceHolder) { gameSurface = null; Native.setSurface(null) }
 
     // ---- input: the touches are the app's now (it works out what they hit); the keys go to the host ----
     override fun onTouchEvent(e: MotionEvent): Boolean {
