@@ -7,7 +7,7 @@ Atualizado em 19/11/2026.
 Foco (decidido em 19/11): os dois jogos que temos (Z-A e Arceus) no PC. Android e outros jogos ficam para depois.
 
 1. **Arceus a 60 fps no PC, como o Z-A.** Em andamento. Pista do Android: `main+0x277d838` liga o present interval 1, mas o mundo anda 2x mais rápido; falta ligar o passo do mundo ao tempo real (como o `FRAME_DT` do Z-A em `framepace.c`).
-2. **Arceus no PC:** 60 fps cai para 30 em cutscene e não volta (ver Runtime e jogos). Listras no chão e atraso nas cutscenes em espera.
+2. **Arceus no PC:** travadas de ~1,3 s na câmera de arremesso da captura. Listras no chão e atraso nas cutscenes em espera.
 3. **Hub 0.0.2:** teste manual das telas novas (primeira vez, importar save, mods, recompilar).
 4. **Depois:** escala de resolução do Arceus no Android; outros jogos no runtime unificado.
 
@@ -34,6 +34,9 @@ Decisão: o hub (Tauri, `hub/`) continua sendo o aplicativo principal. A tela in
 - [x] Ligar e desligar mods pelo hub (`mods.rs`, `set_mod_enabled`): renomeia com/sem `_`, tira de `mods_off` ao ligar, só com o jogo fechado. Falta teste manual na janela do hub.
 
 ## Runtime e jogos
+
+- [x] Arceus 60 fps: não volta mais para 30 abaixo de 50 fps (com frame_dt o mundo segue o relógio; teste com LARECOMP_FPS60_MIN=999: Arceus fica a 60, Z-A volta a 30 como antes).
+- [ ] Arceus: travadas de ~1,3 s em "vsync/pace wait" na câmera de arremesso da captura (~8:10 da gravação de 19/11).
 
 - [ ] (Em espera desde 20/11) Arceus: listras diagonais no chão com capim (5:49 da gravação de 19/11; suspeita: dither de fade ou sombra). Não voltou e não incomoda; reabrir com Gravar sessão + F8.
 - [ ] (Em espera desde 20/11) Arceus: atraso para carregar os Pokémon nas cutscenes. Não apareceu na gravação.
