@@ -208,6 +208,14 @@ pub const ZA: Format = Format { block: 0x3AA1A9AD, slot: 0x1E0, len: 0x158, enc_
 /// Pokémon Legends: Arceus (PA8): bloco 0x2985FE5D, 6 slots de 0x178, blocos de 0x58 (tools/switchos/pla_party.py)
 pub const ARCEUS: Format = Format { block: 0x2985FE5D, slot: 0x178, len: 0x178, enc_end: 0x168, blk: 0x58, nick: 0x60, iv32: 0x94 };
 
+/// o save decifra e tem o bloco do time deste formato (o time pode estar vazio num save novo)
+pub fn has_party_block(save_main: &Path, f: &Format) -> bool {
+    match std::fs::read(save_main) {
+        Ok(p) if p.len() < 64 << 20 => party_block(p, f.block).is_some(),
+        _ => false,
+    }
+}
+
 /// o time do save (vazio se não houver save ou se o formato não for reconhecido)
 pub fn load(save_main: &Path, icons: &Path, f: &Format) -> Vec<PartyMon> {
     let Ok(p) = std::fs::read(save_main) else { return vec![] };

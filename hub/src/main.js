@@ -54,6 +54,7 @@ function status(g) {
   const failed = ex && !ex.cancelled;
   if (g.built) return failed
     ? { text: "Pronto para jogar · a última importação falhou", cls: "ok", tile: "failed" }
+    : g.needs_rebuild ? { text: "Precisa recompilar · o programa foi atualizado", cls: "warn" }
     : unsynced(g) ? { text: "Pronto para jogar · save não sincronizado", cls: "warn" }
     : { text: "Pronto para jogar", cls: "ok" };
   if (failed) return { text: "Importação falhou", cls: "err", tile: "failed" };
@@ -267,9 +268,9 @@ const openGame = (t) => { if (t) setTab(t); setView("game"); };
 function primary() {
   const g = game();
   if (!g) return;
-  if (g.built) return play();
+  if (g.built && !g.needs_rebuild) return play();
   if (view !== "game") openGame("import"); else setTab("import");
-  focusEl($("[data-pick]"));
+  focusEl($("[data-rebuild]") || $("[data-pick]"));
 }
 const closeGame = () => setView("home");
 
@@ -306,12 +307,13 @@ function renderGame() {
   $("#g-name").textContent = g.name;
   $("#g-name").title = g.name; // nome longo corta com reticências; o inteiro fica na dica
 
-  const playLabel = playing ? "Abrindo…" : g.built ? "Jogar" : "Importar jogo";
+  const playLabel = playing ? "Abrindo…" : g.built ? (g.needs_rebuild ? "Recompilar" : "Jogar") : "Importar jogo";
   const playOff = playing ? "disabled" : "";
   const facts = `
     ${g.version ? `<span class="fact">Versão ${esc(g.version)}</span>` : ""}
     ${g.imported && g.dlcs.length ? `<span class="fact">DLC instalada</span>` : ""}
     ${g.mods.length ? `<span class="fact">${g.mods.length} mod${g.mods.length > 1 ? "s" : ""}</span>` : ""}
+    ${g.built && g.needs_rebuild ? `<span class="fact warn">Precisa recompilar</span>` : ""}
     <span class="fact warn" data-syncfact ${unsynced(g) ? "" : "hidden"}>Save não sincronizado</span>`;
   $("#g-meta").innerHTML = `
     <button class="act play" data-act="play" type="button" ${playOff}><kbd class="b-a" data-k="a"></kbd>${playLabel}</button>
@@ -383,14 +385,15 @@ function renderKeys(g) {
   else if (view === "game" && $("[data-reimport-no]")) html = k("a", "Selecionar") + k("b", "Manter como está");
   else if (view === "game" && $("[data-other-no]")) html = k("a", "Selecionar") + k("b", "Voltar");
   else if (view === "game" && $("[data-restore-no]")) html = k("a", "Selecionar") + k("b", "Manter como está");
-  else if (view === "game" && restoring) html = `<span>Restaurando o save…</span>`;
+  else if (view === "game" && $("[data-import-no]")) html = k("a", "Selecionar") + k("b", "Manter como está");
+  else if (view === "game" && restoring) html = `<span>${restoring === true ? "Restaurando o save…" : esc(restoring)}</span>`;
   // inicial: Jogar (A) e Opções (X) já aparecem ao lado do nome; o rodapé não repete
   // inicial: Jogar e Opções aparecem ao lado do nome (onde o mouse clica). No rodapé só voltam
   // no controle, menores e junto de Configurações, que é o lugar onde quem joga do sofá procura.
-  else if (view === "home") html = (inputMode === "pad" ? k("a", g.built ? "Jogar" : "Importar jogo", playing) + k("x", "Opções") : "") + k("menu", "Configurações");
+  else if (view === "home") html = (inputMode === "pad" ? k("a", g.built ? (g.needs_rebuild ? "Recompilar" : "Jogar") : "Importar jogo", playing) + k("x", "Opções") : "") + k("menu", "Configurações");
   else {
     const onBtn = el && $("#view-game").contains(el) && el.matches("button") && !el.matches('[data-act="play"]');
-    const aTxt = el?.matches("#tabs [role=tab]") ? "Entrar na seção" : onBtn ? "Selecionar" : g.built ? "Jogar" : "Importar jogo";
+    const aTxt = el?.matches("#tabs [role=tab]") ? "Entrar na seção" : onBtn ? "Selecionar" : g.built ? (g.needs_rebuild ? "Recompilar" : "Jogar") : "Importar jogo";
     html = k("a", aTxt, aTxt === "Jogar" && playing) + k("y", "Pasta do jogo") +
       `<span class="lr"><kbd class="b-lr" data-k="lb"></kbd><kbd class="b-lr" data-k="rb"></kbd>Seções</span>` + k("b", "Voltar");
   }
@@ -522,6 +525,7 @@ function saveHTML(g, info) {
       ${info?.cloud_exists ? `<button class="btn" data-cloud-folder type="button">Abrir cópia na nuvem</button>` : ""}
     </div>
     ${body}
+    ${importHTML(g, info)}
     <p class="fine">O save fica na pasta do programa, em <code>save</code>, fora da pasta do jogo. Importar o jogo de novo não mexe nele.</p>`;
 }
 
@@ -533,6 +537,7 @@ function wireSave(g, p) {
   if (c) c.onclick = () => openPath(info.cloud_save).catch(() => toast("A cópia na nuvem não está mais lá."));
   $$("[data-backup]", p).forEach((el) => (el.onclick = () => openPath(el.dataset.backup).catch(() => toast("Essa cópia de segurança não está mais lá."))));
   $$("[data-restore]", p).forEach((el) => (el.onclick = () => askRestore(g, el.closest(".backup"))));
+  wireImport(g, p);
 }
 
 const backupLabel = (b) => { const d = stampDate(b.stamp); return { when: d ? fmtWhen(d) : b.name, from: originName(b.origin) }; };
@@ -610,7 +615,159 @@ function explainRestore(raw) {
   return explainError(raw);
 }
 
+/* ---------- aba Save: importar um save de fora (saveimport.rs: import_sources, check_import, import_save) ---------- */
+// Fontes: pasta escolhida (exportação do Switch com JKSV/Checkpoint, ou outra cópia) e os saves do Ryujinx
+// achados pelo title id. A origem só é lida; o save atual vira uma cópia "pre-restore" antes da troca.
+const importCache = {}; // key -> resultado de import_sources (ou { error })
+const importPick = {}; // key -> Candidate da pasta escolhida
+const imported = {}; // key -> { from, created, dir } da última importação (aviso fixo na aba)
+
+async function fetchImports(g) {
+  let src;
+  try { src = (await invoke("import_sources", { key: g.key })) || { error: "sem resposta" }; } catch (e) { src = { error: String(e) }; }
+  const prev = JSON.stringify(importCache[g.key]);
+  importCache[g.key] = src;
+  if (prev !== JSON.stringify(src)) redrawSave(g);
+}
+// redesenha a aba Save (se aberta neste jogo, sem confirmação aberta) e põe o foco em pick(body), ou mantém o lugar
+function redrawSave(g, pick) {
+  const body = $("#pane [data-save-body]");
+  if (!body || tab !== "save" || game()?.key !== g.key || $("[data-import-no]") || $("[data-restore-no]") || restoring) return;
+  const keep = !pick && $("#pane").contains(document.activeElement);
+  const fi = focusables($("#pane")).indexOf(document.activeElement);
+  body.innerHTML = saveHTML(g, saveCache[g.key]);
+  wireSave(g, $("#pane"));
+  if (pick) focusEl(pick(body) || $("[data-save-folder]", body));
+  else if (keep && fi >= 0) { const after = focusables($("#pane")); focusEl(after[Math.min(fi, after.length - 1)]); }
+  syncKeys();
+}
+
+const candFrom = (c) => (c.src === "ryujinx" ? "Ryujinx" : "pasta escolhida");
+function candRow(c, i) {
+  const what = c.ok
+    ? `${c.files} arquivo${c.files === 1 ? "" : "s"}${c.party != null ? `, ${c.party} Pokémon no time` : ""}`
+    : esc(String(c.reason || "").replace(/^importar:\s*/, ""));
+  return `<li class="backup" data-zone data-cand="${i}">
+    <span class="b-when">${c.modified ? fmtDate(c.modified) : "Sem data"}</span>
+    <span class="b-from">save do ${esc(candFrom(c))}: ${c.ok ? what : `<span class="pill warn">${what}</span>`}</span>
+    <span class="b-acts">
+      <button class="btn" type="button" data-import="${i}" ${c.ok ? "" : "disabled"}>Importar este save</button>
+      <button class="btn quiet" type="button" data-cand-folder="${i}">Abrir pasta</button>
+    </span></li>`;
+}
+function importCands(g) {
+  const list = (importCache[g.key]?.ryujinx || []).map((c) => ({ ...c, src: "ryujinx" }));
+  if (importPick[g.key]) list.push({ ...importPick[g.key], src: "pick" });
+  return list;
+}
+function importHTML(g, info) {
+  const src = importCache[g.key];
+  const cands = importCands(g);
+  const local = info?.local_modified ?? g.save_modified;
+  const where = !src || src.error ? "" : src.synced
+    ? "Antes de trocar, o save atual vira uma cópia de segurança (aparece na lista acima)."
+    : `Sem sincronização configurada, o save atual fica guardado em <code>${esc(src.backups_dir)}</code> antes da troca.`;
+  const done = imported[g.key];
+  return `
+    <h2 class="save-sub">Importar um save</h2>
+    ${done ? `<p class="save-done" role="status"><strong>Save importado do ${esc(done.from)}.</strong>
+      ${done.created ? `O save que estava aqui ficou guardado como <code>${esc(done.created)}</code> em <code>${esc(done.dir)}</code>.` : ""}</p>` : ""}
+    <p class="lede">Traga um save do Switch (a pasta exportada com JKSV ou Checkpoint), do Ryujinx ou de outra cópia. A origem não é alterada. ${local ? where : "Ainda não há save neste PC: o importado passa a ser o save."}</p>
+    ${cands.length ? `<ul class="backups">${cands.map(candRow).join("")}</ul>`
+      : src && !src.error ? `<p class="fine">${src.ryujinx_dir ? "O Ryujinx deste PC não tem save deste jogo." : "O Ryujinx não foi encontrado neste PC."}</p>` : ""}
+    <div class="actions" data-zone>
+      <button class="btn" data-import-pick type="button">Escolher pasta do save…</button>
+    </div>
+    <p class="fine">A pasta precisa ter o arquivo <code>main</code>. Feche o jogo antes de importar.</p>`;
+}
+
+function wireImport(g, p) {
+  const pk = $("[data-import-pick]", p);
+  if (pk) pk.onclick = () => pickImport(g);
+  const cands = importCands(g);
+  $$("[data-cand-folder]", p).forEach((el) => (el.onclick = () => openPath(cands[+el.dataset.candFolder].path).catch(() => toast("Essa pasta não está mais lá."))));
+  $$("[data-import]", p).forEach((el) => (el.onclick = () => askImport(g, el.closest(".backup"))));
+}
+
+async function pickImport(g) {
+  if (restoring) return;
+  let dir;
+  try { dir = await pick({ directory: true, title: "Pasta do save (com o arquivo main)" }); } catch { return; }
+  if (!dir) return;
+  let c;
+  try { c = await invoke("check_import", { key: g.key, path: dir }); } catch (e) { return errorToast(explainImport(e)); }
+  importPick[g.key] = c;
+  redrawSave(g, (body) => $("[data-import-pick]", body));
+  if (!c.ok) return errorToast(explainImport(c.reason));
+  askImport(g, $$("#pane [data-cand]").at(-1));
+}
+
+// Confirmação em linha, como askRestore: foco em "Manter como está", B desiste
+function askImport(g, row) {
+  if (restoring || !row) return;
+  const i = row.dataset.cand;
+  const c = importCands(g)[+i];
+  if (!c?.ok) return;
+  const local = saveCache[g.key]?.local_modified ?? g.save_modified;
+  row.classList.add("asking");
+  $(".b-acts", row).innerHTML = `
+    <span class="ask">Importar o save do ${esc(candFrom(c))}${c.modified ? ` de ${esc(fmtDate(c.modified))}` : ""}? ${local
+      ? "Seu save atual vira uma cópia de segurança antes."
+      : "Ainda não há save neste PC: este passa a ser o save."}</span>
+    <button class="btn primary" type="button" data-import-yes>Importar</button>
+    <button class="btn" type="button" data-import-no>Manter como está</button>`;
+  $("[data-import-yes]", row).onclick = () => doImport(g, c, i, row);
+  $("[data-import-no]", row).onclick = () => {
+    $(".b-acts", row).innerHTML = ""; // fecha a confirmação para o redrawSave poder redesenhar
+    redrawSave(g, (body) => $(`[data-import="${i}"]`, body));
+  };
+  $("[data-import-no]", row).focus({ preventScroll: true }); // um A apressado não troca o save
+  syncKeys();
+}
+
+async function doImport(g, c, i, row) {
+  if (restoring) return;
+  restoring = "Importando o save…";
+  row.classList.add("working");
+  row.setAttribute("aria-busy", "true");
+  $(".b-acts", row).innerHTML = `<span class="ask" role="status"><i class="spin" aria-hidden="true"></i>Importando o save do ${esc(candFrom(c))}…</span>`;
+  syncKeys();
+  let res;
+  try { res = await invoke("import_save", { key: g.key, path: c.path }); }
+  catch (e) {
+    restoring = false;
+    redrawSave(g, (body) => $(`[data-import="${i}"]`, body));
+    return errorToast(explainImport(e));
+  }
+  restoring = false;
+  imported[g.key] = { from: candFrom(c), created: res?.created || null, dir: res?.backups_dir || "" };
+  delete importPick[g.key];
+  try { saveCache[g.key] = (await invoke("save_info", { key: g.key })) || saveCache[g.key]; } catch {}
+  paintSync(g.key);
+  redrawSave(g, (body) => $("[data-save-folder]", body));
+  toast("Save importado.");
+}
+
+// Erros do import_save/check_import (saveimport.rs, todos com "importar:") em linguagem clara
+const IMPORT_ERRORS = [
+  [/jogo está aberto|conferir se o jogo/, () => ({ title: "Feche o jogo antes de importar", action: "O save não foi trocado. Feche o jogo e tente de novo." })],
+  [/importação em andamento/, () => ({ title: "Há uma importação em andamento", action: "O save não foi trocado. Espere a importação deste jogo terminar e tente de novo." })],
+  [/arquivo main/, () => ({ title: "Essa pasta não tem um save", action: "Escolha a pasta que tem o arquivo main (a exportação do JKSV ou do Checkpoint, ou a pasta 0 do Ryujinx)." })],
+  [/outro jogo/, (t) => ({ title: "Esse save é de outro jogo", action: `${t.replace(/^importar:\s*/i, "").replace(/^./, (x) => x.toUpperCase())}. O save não foi trocado.` })],
+  [/não decifrou/, () => ({ title: "Esse save não é deste jogo", action: "O arquivo main não foi reconhecido como save deste jogo. O save não foi trocado." })],
+  [/já é o save/, () => ({ title: "Essa pasta já é o save deste PC", action: "Escolha a pasta de onde o save vem." })],
+  [/access is denied|acesso negado|permission denied|os error 5\b|os error 32\b|em uso/, () => ({ title: "Sem permissão para trocar o save", action: "O save não foi trocado. Feche o jogo e programas que estejam usando a pasta do save e tente de novo." })],
+  [/importar:/, () => ({ title: "Não deu para importar", action: "O save atual continua no lugar. Se ele já tinha sido guardado, está entre as cópias de segurança.", unknown: true })],
+];
+function explainImport(raw) {
+  const text = String(raw ?? "").trim();
+  const low = text.toLowerCase();
+  for (const [re, f] of IMPORT_ERRORS) if (re.test(low)) return { ...f(text), detail: text };
+  return explainError(raw);
+}
+
 async function loadSave(g) {
+  fetchImports(g);
   let info;
   try { info = (await invoke("save_info", { key: g.key })) || { error: "sem resposta" }; } catch (e) { info = { error: String(e) }; }
   const prev = JSON.stringify(saveCache[g.key]);
@@ -626,6 +783,47 @@ async function loadSave(g) {
   if (fi >= 0) { const after = focusables($("#pane")); focusEl(after[Math.min(fi, after.length - 1)]); }
 }
 
+/* ---------- primeira vez (lib.rs/firstrun.rs): verificar arquivos, ícones dos Pokémon e shaders, pelo zaprompts ---------- */
+
+const FR_STEPS = [["verify", "Arquivos do jogo"], ["icons", "Ícones dos Pokémon"], ["shaders", "Shaders"]];
+const FR_PILL = { feito: "ok", danificado: "warn", pendente: "", indisponivel: "" };
+let frTimer = null;
+const frWasRunning = {};
+
+function firstRunHTML(st, job) {
+  const rows = FR_STEPS.map(([k, label]) => {
+    const s = st[k];
+    return `<div><dt>${label}</dt><dd><span class="pill ${FR_PILL[s.state] ?? ""}">${esc(s.detail)}</span></dd></div>`;
+  }).join("");
+  const pending = FR_STEPS.some(([k]) => st[k].state === "pendente");
+  const running = job && job.running;
+  const msg = running ? `<p class="fine">${esc(job.step)}… ${Math.round(job.progress * 100)}%</p>`
+    : job && job.error ? `<p class="fine err">${esc(job.step)}: ${esc(job.error)}</p>` : "";
+  const btn = st.can_run && (pending || running)
+    ? `<div class="actions"><button class="btn" data-fr-run type="button" ${running ? "disabled" : ""}>${running ? "Preparando…" : "Preparar agora"}</button></div>` : "";
+  return `<dl class="facts">${rows}</dl>${msg}${btn}`;
+}
+
+// Mostra o estado das etapas e, enquanto o job "firstrun:<jogo>" roda, atualiza a cada segundo
+async function loadFirstRun(g, p) {
+  clearTimeout(frTimer);
+  const box = $("[data-firstrun]", p);
+  if (!box) return;
+  let st, job;
+  try { st = await invoke("firstrun_status", { key: g.key }); job = await invoke("job_status", { key: `firstrun:${g.key}` }); }
+  catch { return void (box.innerHTML = ""); }
+  if (!box.isConnected) return;
+  box.innerHTML = firstRunHTML(st, job);
+  const b = $("[data-fr-run]", box);
+  if (b) b.onclick = async () => {
+    try { await invoke("firstrun_run", { key: g.key, steps: [] }); } catch (e) { return fail(e); }
+    loadFirstRun(g, p);
+  };
+  if (job && job.running) frTimer = setTimeout(() => loadFirstRun(g, p), 1000);
+  else if (frWasRunning[g.key] && job && !job.error) refresh(); // (o time ganha os ícones novos)
+  frWasRunning[g.key] = !!(job && job.running);
+}
+
 const paneHTML = {
   about: (g) => `
     <dl class="facts">
@@ -637,16 +835,27 @@ const paneHTML = {
         : `<span class="muted">Nenhuma instalada</span>`}</dd></div>
       ${g.built ? "" : `<div><dt>Situação</dt><dd>${hint(g)}</dd></div>`}
     </dl>
+    <div data-firstrun></div>
     <p class="fine">Código do jogo: <code>${esc(g.title_id)}</code></p>`,
   mods: (g) => `
     <p class="lede">Os mods ficam na pasta de mods, cada um na sua pasta, e valem só para este jogo.</p>
     <ul class="list">${g.mods.length
-      ? g.mods.map((m) => `<li><strong>${esc(m.name)}</strong><small>${m.files} arquivo${m.files === 1 ? "" : "s"}</small></li>`).join("")
+      ? g.mods.map((m) => `<li class="mod${m.on ? "" : " off"}">
+          <span class="mod-name"><strong>${esc(m.name)}</strong><small>${m.files} arquivo${m.files === 1 ? "" : "s"}${m.code ? " · muda o código" : ""}</small></span>
+          <button class="switch" type="button" role="switch" aria-checked="${m.on}" data-mod="${esc(m.name)}"
+            aria-label="${m.on ? "Desligar" : "Ligar"} ${esc(m.name)}"><span class="switch-knob"></span></button>
+        </li>`).join("")
       : `<li class="empty">Nenhum mod para este jogo ainda.</li>`}</ul>
     <button class="btn" data-mods-folder type="button">Abrir pasta de mods</button>
+    <p class="fine">Ligue ou desligue com o jogo fechado. Desligado, a pasta ganha um "_" na frente e o jogo a ignora.</p>
     <p class="fine">Formato técnico: <code>${esc(g.title_id)}/romfs</code>, o mesmo do Atmosphère.</p>`,
   save: (g) => `<div class="save" data-save-body>${saveHTML(g, saveCache[g.key])}</div>`,
-  import: (g) => `
+  import: (g) => `${g.built && g.needs_rebuild && !jobs[g.key]?.running ? `
+    <div class="actions ask-box rebuild">
+      <span class="ask">O SwitchOS foi atualizado e o código deste jogo precisa ser compilado de novo (10 a 30 min).
+        Os arquivos do jogo e o save não mudam.</span>
+      <button class="btn primary" data-rebuild type="button">Recompilar agora</button>
+    </div>` : ""}
     <p class="lede">Escolha o NSP/XCI do jogo base e da atualização. O hub extrai com o seu <code>prod.keys</code> e compila o código do jogo neste PC.</p>
     <ul class="list files" data-files></ul>
     <div class="actions">
@@ -656,14 +865,29 @@ const paneHTML = {
 };
 
 const paneWire = {
-  mods: (g, p) => ($("[data-mods-folder]", p).onclick = async () => {
-    try { await openPath(await invoke("ensure_dir", { path: await invoke("mods_dir") })); } catch (e) { fail(e); }
-  }),
+  about: (g, p) => loadFirstRun(g, p),
+  mods: (g, p) => {
+    $("[data-mods-folder]", p).onclick = async () => {
+      try { await openPath(await invoke("ensure_dir", { path: await invoke("mods_dir") })); } catch (e) { fail(e); }
+    };
+    $$("[data-mod]", p).forEach((b) => (b.onclick = async () => {
+      const on = b.getAttribute("aria-checked") !== "true";
+      const name = b.dataset.mod;
+      b.disabled = true;
+      try {
+        const code = await invoke("set_mod_enabled", { key: g.key, name, on });
+        toast(`${name} ${on ? "ligado" : "desligado"}.${code ? " O próximo Jogar recompila o código do jogo." : ""}`);
+        await refresh();
+      } catch (e) { b.disabled = false; fail(e); }
+    }));
+  },
   save: (g, p) => {
     wireSave(g, p);
     loadSave(g);
   },
   import: (g, p) => {
+    const rb = $("[data-rebuild]", p);
+    if (rb) rb.onclick = () => startRebuild(g.key);
     const files = $("[data-files]", p);
     const btn = $("[data-import]", p);
     const show = () => {
@@ -728,7 +952,7 @@ function otherGame(g) {
 function askOtherGame(g, p) {
   const names = otherGame(g);
   const um = names.length === 1;
-  const box = $(".actions", p);
+  const box = $(".actions:not(.rebuild)", p);
   box.classList.add("ask-box");
   box.innerHTML = `
     <span class="ask">${um ? "Um arquivo escolhido não é" : `${names.length} arquivos escolhidos não são`} do ${esc(g.name)}:
@@ -744,7 +968,7 @@ function askOtherGame(g, p) {
 // Reimportar um jogo já compilado: o save fica em <pasta do programa>/save, fora da pasta do
 // jogo (<pasta dos jogos>/<jogo>), então a importação nunca toca nele (lib.rs: save_dir).
 function askReimport(g, p) {
-  const box = $(".actions", p);
+  const box = $(".actions:not(.rebuild)", p);
   box.classList.add("ask-box");
   box.innerHTML = `
     <span class="ask">Este jogo já está pronto para jogar. Importar de novo substitui a compilação atual e leva de 10 a 30 min.
@@ -755,6 +979,15 @@ function askReimport(g, p) {
   $("[data-reimport-no]", box).onclick = () => { renderTab(); focusEl($("[data-pick]")); };
   $("[data-reimport-no]", box).focus({ preventScroll: true }); // um A apressado não substitui nada
   syncKeys();
+}
+
+// Só a compilação (lib.rs: rebuild_game): acompanhada como uma importação
+async function startRebuild(key) {
+  try { await invoke("rebuild_game", { key }); }
+  catch (e) { return fail(e); }
+  markBusy(key, true);
+  if (tab === "import" && key === current) renderTab();
+  watchJob(key);
 }
 
 async function startImport(key, files = picked[key]) {
@@ -1186,6 +1419,7 @@ function command(c) {
       if ($("[data-reimport-no]")) return $("[data-reimport-no]").click();
       if ($("[data-other-no]")) { renderTab(); return focusEl($("[data-pick]")); }
       if ($("[data-restore-no]")) return $("[data-restore-no]").click();
+      if ($("[data-import-no]")) return $("[data-import-no]").click();
       if (restoring) return; // não sai da página no meio da restauração
       return closeGame();
     case "a":

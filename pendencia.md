@@ -4,31 +4,27 @@ Atualizado em 19/11/2026.
 
 ## Próximos passos, por prioridade
 
-1. **Ligar no hub o backend que já existe** (a interface nova está pronta e aprovada):
-   - botão de restaurar save (`switchos.py backups` / `restore`).
-2. **Hub 0.0.2:** trazer para o hub o que hoje só a tela do ZA Recomp faz (lista abaixo).
-3. **Arceus no PC:** piscar de texturas e atraso nas cutscenes. Precisa do usuário jogando.
-4. **Projetos maiores:** escala de resolução do Arceus no Android; outros jogos no runtime unificado.
+1. **Hub 0.0.2:** trazer para o hub o que hoje só a tela do ZA Recomp faz (lista abaixo).
+2. **Arceus no PC:** piscar de texturas e atraso nas cutscenes. Precisa do usuário jogando.
+3. **Projetos maiores:** escala de resolução do Arceus no Android; outros jogos no runtime unificado.
 
 ## Hub 0.0.2: compilador integrado e entrada direta no jogo
 
 Decisão: o hub (Tauri, `hub/`) continua sendo o aplicativo principal. A tela inicial do ZA Recomp (`engines/las-za/runtime/ui/launcher.mm`) não é renomeada nem vira o hub. Ela fica só para quem abrir o `lasrecomp.exe` direto.
 
 - [x] Interface nova (tela de console: prateleira, time, abas, controle). Aprovada em 19/11; o hub já abre o recomp.
-- [ ] Verificar os arquivos do jogo (hoje fica em `cache/verify.txt`).
+- [x] Verificar os arquivos do jogo, gerar os ícones dos Pokémon e preparar os shaders: `firstrun.rs` (`firstrun_status` / `firstrun_run`, job `firstrun:<jogo>`), na aba Sobre do jogo. Mesmos arquivos e marcadores da tela do ZA Recomp (`cache/verify.*`, `cache/party_icons*`, `cache/shader_code_game.bin.*`). Só Z-A.
 - [ ] Avisar quando o runtime mudou e o jogo precisa ser recompilado (`lasgame.dll.id` diferente do `GAMELIB_ID`).
-- [ ] Gerar os ícones dos Pokémon na primeira vez (`zaprompts --party-icons`). Hoje foram gerados à mão.
-- [ ] Preparar os shaders na primeira vez (`zaprompts --shader-code`).
 - [ ] Importar saves (do Switch, do Ryujinx e de outras fontes).
-- [ ] "Jogar" abre direto no jogo, sem passar pela tela do ZA Recomp.
+- [x] "Jogar" abre direto no jogo (`launch.rs`, `lasrecomp.exe --play <pasta>`; recusa se o jogo já está aberto). Falta recompilar o runtime com a mudança de `runtime/main.c`: com o código do jogo desatualizado (runtime novo, `.pchtxt` ligado/desligado) o `--play` volta para a tela inicial em vez de fechar com erro.
 
 ## Hub: outros pontos
 
 - [x] **Time do save do Arceus no hub.** `party.rs` lê Z-A e Arceus (`party::ZA` / `party::ARCEUS`); teste com cópias dos saves: `PARTY_TEST_PLA=... PARTY_TEST_ZA=... cargo test --lib party` (Cyndaquil Nv. 5, Tepig Nv. 7).
-- [ ] Ícones do time do Arceus: o cache `party_icons` vem do romfs do Z-A, que não tem o Cyndaquil (o hub mostra a Poké Ball). Gerar ícones a partir do romfs do Arceus.
+- [ ] Ícones do time do Arceus: o cache `party_icons` vem do romfs do Z-A, que não tem o Cyndaquil (o hub mostra a Poké Ball). Gerar ícones a partir do romfs do Arceus. O `zaprompts --party-icons` não serve: o romfs do Arceus não tem `arc/data.trpfs` ("no arc/data.trpfs / data.trpfd in it"); os ícones são BNTX soltos no romfs (`pokeicon_s_<espécie>_<forma>_000_n_00000000_fn_<n|r>.bntx`, também `pokeicon_l_`; o `pokeicon_s_0155` existe). Falta: modo novo no `prompt_textures.py` que leia BNTX soltos do romfs.bin, refazer o zaprompts congelado, pasta própria (ex. `cache/party_icons_pla`) e o nome no `party.rs`.
 - [x] Hub usar o `zaimport --probe` (`probe<TAB>pacote<TAB>title id base<TAB>base|update|dlc`) para avisar antes de importar um NSP/XCI de outro jogo. Comando `probe_packages`; a aba Importação etiqueta cada arquivo (Jogo base, Atualização, DLC ou "É de ...") e confirma em linha antes de importar o que não é do jogo.
-- [ ] Hub chamar `switchos.py backups <jogo>` / `restore <jogo> <backup|latest>` (o save atual vira backup `*-pre-restore` antes).
-- [ ] Ligar e desligar mods pelo hub (prefixo `_` ou `mods_off` do runtime).
+- [x] Restaurar save pelo hub (`restore_backup`, em Rust, compatível com o `switchos.py backups` / `restore`): o save atual vira `*-pre-restore` antes. Teste ponta a ponta: `restore_e2e` (variáveis `RESTORE_E2E_*`, só com cópias).
+- [x] Ligar e desligar mods pelo hub (`mods.rs`, `set_mod_enabled`): renomeia com/sem `_`, tira de `mods_off` ao ligar, só com o jogo fechado. Falta teste manual na janela do hub.
 
 ## Runtime e jogos
 
@@ -39,12 +35,18 @@ Decisão: o hub (Tauri, `hub/`) continua sendo o aplicativo principal. A tela in
 - [ ] Confirmar no jogo os textos da tradução PT-BR parcial do Z-A.
 - [ ] Crash raro do Z-A: ponteiro nulo (`0xd0`) uma vez, ao abrir com DLC + tradução. Não se repetiu em 8 rodadas. Log em `ZA Recomp/logs/crash-raros/`.
 - [ ] Integrar ao runtime unificado os outros jogos: Sword/Shield, BDSP, TotK.
+  - Pesquisa (19/11): nenhum dump dos três em `D:\Games` (nada testável hoje).
+  - Sword/Shield: o mais viável. `engines/las-swsh` é da mesma linhagem do las-za e roda (Sword 1.3.2). Molde do Arceus: `SWSH_BUILDS` + patches no `gen.py`, papéis dos subsdk (movie/glslc invertidos), portar os HLE do SwSh (60 fps, framepace, wildbattle...), perfil `party::SWSH` (SCBlock).
+  - BDSP e TotK: runtime e gerador próprios (Unity/IL2CPP com exceções C++ e GC; TotK com HLE de SDK e Vulkan próprio). Fundir seria reescrita. Caminho barato: o hub lançar como engine externo (campo de exe e pasta de save por jogo no `GameDef`).
 - [x] Crash do Z-A com DLC + tradução: não era o `data.trpfd` do mod (o runtime já ignora a cópia do mod). Era falta de memória no PC (commit negado, erro 1455); o diálogo agora explica "Your PC ran out of memory" (`rt_commit_failed`).
 - [x] `boot_test.sh` encerra o jogo pelo PID do Windows (`taskkill`).
 
 ## Android
 
 - [ ] **Escala de resolução do Arceus.** `DM_RENDER_SCALE` e `DM_DYN_SCALE` só funcionam em jogos cujo `patches.py` tenha os render-scale stubs (hoje só os Zelda e mais 3). Exige engenharia reversa: achar onde o motor da Game Freak define o tamanho do render alvo e criar os stubs no perfil `01001F5010DFA000`. É o maior ganho contra o calor (15-30% menos GPU).
+  - Pesquisa (19/11, só leitura, nada aplicado): o Arceus 1.1.1 já tem resolução dinâmica própria (`main+0xcc35a4`: 4 níveis, até 0,8 x 0,7) e guarda a escala em `3DBufferWidthScale`/`HeightScale`. Três leitores: `0x29b2518`, `0x29fb338`, `0x2b9f940` (bytes originais `612245bd`, `e07340bd`, `c002221e`; x8 livre nos três). Stub proposto em `dm/games/01001F5010DFA000/patches.py`: trocar a escala lida pelo float do state +0x10 (`DM_RENDER_SCALE`; 1,0 = escala do jogo), como no BotW, com `FRAME_STEP` e `ctx.render_scale = 1` (conferir `fps_target` = 0). Os render targets continuam do tamanho cheio: o ganho é só de GPU.
+  - Teste no M55: APK com o perfil, `DM_RENDER_SCALE=0.6` no `env.txt`, logcat `3D views rendered at 0.60`; comparar fps e temperatura na mesma cena. Borda preta ou lixo = algum leitor faltando (procurar os hashes `0x4aa9ba3dccea94ea` / `0x66e7a756352d0d9f`).
+  - Correção: só BotW e TotK têm render-scale stub (não "os Zelda e mais 3"); Sword/Shield não tem, então não há molde da Game Freak.
   - Medição de base, Galaxy M55, ~25 min: 29-30 fps na introdução, 23 fps no título com o cenário; bateria de 42 °C para 47 °C ainda subindo; 777 mA, mais do que o carregador de 5 V/0,9 A entrega; estado térmico normal com corte leve na GPU; 640 MB do jogo em swap, com o lmkd matando apps.
 - [ ] Controles na tela: estão feios e cobrem quase tudo. Refazer no estilo da interface nova.
 - [ ] Mover o dump do Brilliant Diamond (`Download/Pokemon Brilliant Diamond Switch NSP Base Game` e `Download/PokemonBrilliant Diamond…`) para `/sdcard/SwitchOS/`. O shell do Screen Mirror só aceita comandos de leitura: fazer à mão.

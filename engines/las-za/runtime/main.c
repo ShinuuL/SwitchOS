@@ -387,6 +387,13 @@ int main(int argc, char **argv) {
         }
     }
     log_system();
+    // SwitchOS (the hub's "Jogar" uses --play): straight into the game only while the game code there is the one
+    // wanted - after a runtime update or a mod's .pchtxt turned on/off, boot() would stop on "built for another
+    // version". Then the start screen comes up instead: it rebuilds the code (Play page) and goes on from there.
+    if (skip_launcher && !no_launcher && !getenv("LARECOMP_INPUT") && !gamelib_present(root)) {
+        fprintf(stderr, "[main] --play: the game code isn't built for these files/mods - start screen to build it\n");
+        skip_launcher = false;
+    }
     for (bool title = !skip_launcher;;) {
         if (title && no_launcher) {
             fprintf(stderr, "[main] LARECOMP_NO_LAUNCHER is set: not showing the start screen - exiting\n");

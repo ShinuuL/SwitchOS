@@ -63,7 +63,10 @@ rm -rf build/dist-za && mkdir -p "$D/gamelib-src" "$D/zaimport"
 cp $B/lasrecomp.exe $B/lasrecomp.dll.a "$D/"
 # the release notes' last line: the start screen reads it to say whether updating compiles the game again
 # (runtime/ui/launcher.mm update_thread) - paste build/release-gamelib.txt at the end of the notes
-echo "<!-- zarecomp-gamelib: $(make -s gamelib-id B=$B RELEASE=1 GENARCH="$GENARCH" GENOPT="$GENOPT") -->" > build/release-gamelib.txt
+GAMELIB_ID=$(make -s gamelib-id B=$B RELEASE=1 GENARCH="$GENARCH" GENOPT="$GENOPT")
+echo "<!-- zarecomp-gamelib: $GAMELIB_ID -->" > build/release-gamelib.txt
+# the same id next to the exe: the SwitchOS hub compares it with each game's lasgame.dll.id to say "recompile"
+echo "$GAMELIB_ID" > "$D/gamelib.id"
 cat build/release-gamelib.txt
 cp -R build/helper/lasgen "$D/"
 cp -R build/helper/zaprompts "$D/"

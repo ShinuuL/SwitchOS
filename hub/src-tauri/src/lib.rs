@@ -3,7 +3,11 @@
 //! O hub não roda jogo nenhum: ele organiza as pastas e chama o runtime unificado (lasrecomp.exe, engines/las-za) e o
 //! importador (zaimport.exe). Configuração em %APPDATA%\SwitchOS\hub.json.
 
+mod firstrun;
+mod launch;
+mod mods;
 mod party;
+mod saveimport;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -102,12 +106,6 @@ fn set_config(config: Config) -> Result<(), String> {
 // ------------------------------------------------------------------ estado de cada jogo
 
 #[derive(Serialize)]
-struct ModInfo {
-    name: String,
-    files: usize,
-}
-
-#[derive(Serialize)]
 struct GameState {
     #[serde(flatten)]
     def: GameDef,
@@ -116,15 +114,30 @@ struct GameState {
     built: bool,
     save_dir: String,
     save_modified: Option<u64>,
-    mods: Vec<ModInfo>,
+    mods: Vec<mods::ModInfo>,
     /// ícone do jogo (extraído do Control NCA pelo zaimport) como data URL
     icon: Option<String>,
     /// versão do jogo instalada (version.txt: DisplayVersion do Control NCA, gravado pelo zaimport)
     version: Option<String>,
     /// DLCs instaladas (<pasta do jogo>/aoc/<title id>.bin, lidas pelo serviço aoc:u do runtime)
     dlcs: Vec<DlcInfo>,
-    /// o time do save (por enquanto só o Z-A: o leitor é o da tela inicial do ZA Recomp)
+    /// o time do save (Z-A e Arceus: party.rs)
     party: Vec<party::PartyMon>,
+    /// o runtime mudou desde a compilação: o código do jogo precisa ser compilado de novo (gamelib_stale)
+    needs_rebuild: bool,
+}
+
+/// O código do jogo foi compilado por outro runtime? Compara o `gamelib.id` da pasta do programa
+/// (gravado pelo tools/za/dist.sh: o GAMELIB_ID do lasrecomp.exe) com o `lasgame.dll.id` do jogo
+/// (GAMELIB_ID[-v2]-<build id do jogo>[-p<patches>], runtime/gamelib.h). Sem um dos dois, não avisa.
+fn gamelib_stale(runtime_dir: &Path, game_dir: &Path) -> bool {
+    let read = |p: PathBuf| fs::read_to_string(p).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    let (Some(rt), Some(game)) = (read(runtime_dir.join("gamelib.id")), read(game_dir.join("lasgame.dll.id"))) else {
+        return false;
+    };
+    // só o primeiro trecho é do runtime; o "-v2" (CPU sem AVX2) é decidido pelo runtime nesta máquina
+    let first = |s: &str| s.split('-').next().unwrap_or("").to_ascii_lowercase();
+    first(&rt) != first(&game)
 }
 
 #[derive(Serialize)]
@@ -163,48 +176,6 @@ fn save_dir(cfg: &Config, g: &GameDef) -> PathBuf {
     if g.key == "za" { base.join("save_0") } else { base.join(g.title_id.to_lowercase()).join("save_0") }
 }
 
-fn count_files(p: &Path) -> usize {
-    fs::read_dir(p)
-        .map(|rd| rd.flatten().map(|e| if e.path().is_dir() { count_files(&e.path()) } else { 1 }).sum())
-        .unwrap_or(0)
-}
-
-/// O mesmo critério do runtime (services/mod_layout.c): outros jogos só pela pasta com o title id
-fn mod_romfs(mod_dir: &Path, g: &GameDef) -> Option<PathBuf> {
-    let tid = g.title_id;
-    let mut roots = vec![
-        mod_dir.join("atmosphere").join("contents").join(tid).join("romfs"),
-        mod_dir.join("contents").join(tid).join("romfs"),
-        mod_dir.join(tid).join("romfs"),
-    ];
-    if g.key == "za" {
-        roots.push(mod_dir.join("romfs"));
-    }
-    roots.into_iter().find(|p| p.is_dir()).or_else(|| {
-        // (sem diferenciar maiúsculas no title id, como o runtime)
-        fs::read_dir(mod_dir).ok()?.flatten().find_map(|e| {
-            (e.file_name().to_string_lossy().eq_ignore_ascii_case(tid) && e.path().join("romfs").is_dir())
-                .then(|| e.path().join("romfs"))
-        })
-    })
-}
-
-fn mods_for(cfg: &Config, g: &GameDef) -> Vec<ModInfo> {
-    let mut out = vec![];
-    if let Ok(rd) = fs::read_dir(Path::new(&cfg.runtime_dir).join("mods")) {
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || name.starts_with('_') || !e.path().is_dir() {
-                continue;
-            }
-            if let Some(r) = mod_romfs(&e.path(), g) {
-                out.push(ModInfo { name, files: count_files(&r) });
-            }
-        }
-    }
-    out
-}
-
 #[tauri::command]
 fn list_games() -> Vec<GameState> {
     let cfg = get_config();
@@ -227,7 +198,7 @@ fn list_games() -> Vec<GameState> {
                 dir: dir.to_string_lossy().into(),
                 save_dir: sd.to_string_lossy().into(),
                 save_modified,
-                mods: mods_for(&cfg, g),
+                mods: mods::list(Path::new(&cfg.runtime_dir), g),
                 version: fs::read_to_string(dir.join("version.txt")).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
                 dlcs: dlcs_in(&dir),
                 party: match g.key {
@@ -235,6 +206,7 @@ fn list_games() -> Vec<GameState> {
                     "arceus" => party::load(&sd.join("main"), &Path::new(&cfg.runtime_dir).join("cache").join("party_icons"), &party::ARCEUS),
                     _ => vec![],
                 },
+                needs_rebuild: dir.join("lasgame.dll").is_file() && gamelib_stale(Path::new(&cfg.runtime_dir), &dir),
                 icon: fs::read(dir.join("icon.jpg")).ok().map(|b| {
                     use base64::Engine;
                     format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(b))
@@ -253,21 +225,23 @@ fn play_game(key: String) -> Result<u32, String> {
     if !g.supported {
         return Err(format!("{} ainda não roda no runtime do hub", g.name));
     }
-    let dir = Path::new(&cfg.games_dir).join(g.key);
-    if !dir.join("lasgame.dll").is_file() {
-        return Err("o código do jogo ainda não foi compilado: use Importar".into());
+    launch::play(Path::new(&cfg.runtime_dir), &Path::new(&cfg.games_dir).join(g.key), runtime_processes())
+}
+
+/// Liga ou desliga um mod (pasta com/sem "_" em <runtime>/mods). Só com o jogo fechado.
+/// Devolve true se o mod tem código (.pchtxt): o próximo "Jogar" recompila o código do jogo.
+#[tauri::command]
+fn set_mod_enabled(key: String, name: String, on: bool, state: tauri::State<Jobs>) -> Result<bool, String> {
+    game_def(&key)?;
+    if state.lock().unwrap().values().any(|j| j.running) {
+        return Err("Espere a importação terminar para mexer nos mods.".into());
     }
-    let exe = Path::new(&cfg.runtime_dir).join("lasrecomp.exe");
-    if !exe.is_file() {
-        return Err(format!("lasrecomp.exe não encontrado em {}", cfg.runtime_dir));
+    match runtime_processes() {
+        Some(0) => {}
+        Some(_) => return Err("Feche o jogo antes de ligar ou desligar mods: ele lê os mods ao abrir e pode estar usando os arquivos.".into()),
+        None => return Err("Não consegui conferir se o jogo está aberto. Feche o jogo e tente de novo.".into()),
     }
-    let child = Command::new(&exe)
-        .arg("--play")
-        .arg(&dir)
-        .current_dir(&cfg.runtime_dir)
-        .spawn()
-        .map_err(|e| format!("não abriu {}: {e}", exe.display()))?;
-    Ok(child.id())
+    mods::set(Path::new(&get_config().runtime_dir), &name, on)
 }
 
 // ------------------------------------------------------------------ importar (zaimport + --build-game, em segundo plano)
@@ -491,6 +465,43 @@ fn import_game(key: String, packages: Vec<String>, state: tauri::State<Jobs>) ->
 /// A pasta do jogo fica com o que já foi extraído/compilado; um novo import roda as
 /// duas etapas de novo por cima dela, e o jogo só conta como compilado quando o
 /// --build-game termina, então o "Jogar" continua bloqueado.
+/// Só compila de novo o código do jogo (o runtime mudou: needs_rebuild). Os arquivos do jogo ficam como estão.
+#[tauri::command]
+fn rebuild_game(key: String, state: tauri::State<Jobs>) -> Result<(), String> {
+    let cfg = get_config();
+    let g = game_def(&key)?;
+    let dir = Path::new(&cfg.games_dir).join(g.key);
+    if !(dir.join("exefs").join("main").is_file() && dir.join("romfs.bin").is_file()) {
+        return Err(format!("{} ainda não foi importado", g.name));
+    }
+    let exe = Path::new(&cfg.runtime_dir).join("lasrecomp.exe");
+    if !exe.is_file() {
+        return Err(format!("lasrecomp.exe não encontrado em {}", cfg.runtime_dir));
+    }
+    let jobs: Jobs = state.inner().clone();
+    if jobs.lock().unwrap().get(&key).map(|j| j.running).unwrap_or(false) {
+        return Err("já existe uma importação em andamento".into());
+    }
+    job_update(&jobs, &key, |j| *j = Job { running: true, step: "Compilando o código do jogo (10 a 30 min)".into(), ..Default::default() });
+    let rt = cfg.runtime_dir.clone();
+    std::thread::spawn(move || {
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let mut c = Command::new(&exe);
+        c.env("LARECOMP_BUILD_JOBS", threads.to_string()).arg("--build-game").arg(&dir).current_dir(&rt);
+        let r = run_logged(&jobs, &key, c, 0.0, 0.0);
+        job_update(&jobs, &key, |j| {
+            j.running = false;
+            j.pid = None;
+            match r {
+                Err(_) if j.cancel => { j.step = "Cancelado".into(); j.error = Some(CANCELLED.into()); }
+                Ok(()) => { j.step = "Pronto para jogar".into(); j.progress = 1.0; }
+                Err(e) => { j.step = "Falhou ao compilar".into(); j.error = Some(e); }
+            }
+        });
+    });
+    Ok(())
+}
+
 #[tauri::command]
 fn cancel_import(key: String, state: tauri::State<Jobs>) -> Result<(), String> {
     let pid = {
@@ -981,6 +992,31 @@ fn restore_backup(key: String, backup_name: String, state: tauri::State<Jobs>) -
 }
 
 #[cfg(test)]
+mod gamelib_tests {
+    use super::*;
+
+    #[test]
+    fn stale() {
+        let d = std::env::temp_dir().join(format!("switchos-hub-gamelib-{}", std::process::id()));
+        let (rt, game) = (d.join("rt"), d.join("game"));
+        fs::create_dir_all(&rt).unwrap();
+        fs::create_dir_all(&game).unwrap();
+        assert!(!gamelib_stale(&rt, &game)); // sem os arquivos: não avisa
+        fs::write(rt.join("gamelib.id"), "cc28575f6333d0f6
+").unwrap();
+        assert!(!gamelib_stale(&rt, &game));
+        fs::write(game.join("lasgame.dll.id"), "cc28575f6333d0f6-AEE8F150DDA1B5A8
+").unwrap();
+        assert!(!gamelib_stale(&rt, &game));
+        fs::write(game.join("lasgame.dll.id"), "cc28575f6333d0f6-v2-AEE8F150DDA1B5A8-p0123").unwrap();
+        assert!(!gamelib_stale(&rt, &game));
+        fs::write(game.join("lasgame.dll.id"), "0123456789abcdef-AEE8F150DDA1B5A8").unwrap();
+        assert!(gamelib_stale(&rt, &game));
+        let _ = fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
 mod restore_tests {
     use super::*;
 
@@ -1071,8 +1107,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Jobs::default())
         .invoke_handler(tauri::generate_handler![
-            get_config, set_config, list_games, play_game, import_game, probe_packages, cancel_import, job_status, ensure_dir, mods_dir, check_paths, save_info,
-            restore_backup
+            get_config, set_config, list_games, play_game, set_mod_enabled, import_game, rebuild_game, probe_packages, cancel_import, job_status, ensure_dir, mods_dir, check_paths, save_info,
+            restore_backup, saveimport::import_sources, saveimport::check_import, saveimport::import_save, firstrun::firstrun_status, firstrun::firstrun_run
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o SwitchOS Hub");
