@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img alt="nx2android" src="docs/images/logo-badge.svg" height="140">
+  <img alt="SwitchOS" src="docs/images/logo-badge.svg" height="140">
 </h1>
 
 > **中文文档**。English: [README.md](README.md)

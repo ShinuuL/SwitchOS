@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "skills": {
+    "app-icon": {
+      "source": "Code-with-Beto/skills",
+      "commit": "246e0c74d8e5752987cf84f3f54b7c92a40f2218",
+      "sourceType": "github",
+      "skillPath": "plugins/code-with-beto/skills/app-icon/SKILL.md",
+      "computedHash": "0d2361e3041c7d3c4bd0d67b9ed22f2588eda2483c3e98ca426d26171bc247d7"
+    }
+  }
+}
