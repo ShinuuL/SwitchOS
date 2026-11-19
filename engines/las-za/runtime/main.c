@@ -295,6 +295,11 @@ static void log_startup_info(void) {
             si.cpu[0] ? si.cpu : "unknown CPU", cores, ram, si.package ? ", " : "", si.package ? si.package : "");
 }
 
+// SwitchOS: the game in the data root, from its exefs/main build id (set in main before anything starts): the window
+// title and the crash dialog name it (NULL: neither Z-A nor Arceus)
+const char *rt_game_name;
+bool rt_game_is_pla;
+
 int main(int argc, char **argv) {
     plat_init();
     log_startup_info();
@@ -318,9 +323,11 @@ int main(int argc, char **argv) {
     bool skip_launcher = no_launcher || getenv("LARECOMP_INPUT");  // tests boot straight in
     if (getenv("LARECOMP_FORCE_LAUNCHER")) skip_launcher = false;  // (test: the start screen, then the scripted input)
     static char arg_root[1024], build_mod[1024];
+    bool play = false;  // (SwitchOS: --play, the hub's "Jogar": the start screen never comes up - see below)
+    extern bool g_play_mode;  // (runtime/ui/menu.mm: Quit > "Back to the hub" instead of "Quit to Start Screen")
     bool build_game = false;  // (SwitchOS dev: --build-game: the game code built from the data root's game files, then exit)
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--play")) skip_launcher = true;
+        if (!strcmp(argv[i], "--play")) skip_launcher = play = g_play_mode = true;
         // (dev: --build-mod <a code mod's NSO>: its library built - runtime/gamebuild.c modbuild_run - then exit)
         else if (!strcmp(argv[i], "--build-game")) build_game = true;
         else if (!strcmp(argv[i], "--build-mod") && i + 1 < argc) {
@@ -349,6 +356,23 @@ int main(int argc, char **argv) {
         fprintf(stderr, ok ? "build-mod: %s\n" : "build-mod failed: %s\n", ok ? dll : why[0] ? why : "no room for it");
         exit(ok ? 0 : 1);
     }
+    // SwitchOS (the hub's "Jogar" uses --play): straight into the game only while the game code there is the one
+    // wanted - after a runtime update or a mod's .pchtxt turned on/off, boot() would stop on "built for another
+    // version". --play then exits with PLAY_EXIT_STALE and no window: the hub (hub/src-tauri/src/launch.rs) reads the
+    // code and offers its "Recompilar" (lasrecomp --build-game). A test's skip without --play still gets the start
+    // screen, which rebuilds the code (Play page) and goes on from there.
+    // (before the log rotation below: an exit here keeps logs/play-anterior.log, the session before; and before any
+    // window - ui_window_init, whose quick_exit_handler would turn the exit into a window teardown)
+    enum { PLAY_EXIT_STALE = 4 };  // (3: LARECOMP_NO_LAUNCHER's exit below; keep in step with launch.rs)
+    if (skip_launcher && !no_launcher && !getenv("LARECOMP_INPUT") && !gamelib_present(root)) {
+        if (play) {
+            fprintf(stderr, "[main] --play: the game code isn't built for these files/mods - exiting (code %d) for "
+                            "the hub to rebuild it\n", PLAY_EXIT_STALE);
+            exit(PLAY_EXIT_STALE);
+        }
+        fprintf(stderr, "[main] the game code isn't built for these files/mods - start screen to build it\n");
+        skip_launcher = false;
+    }
     {   // Pokémon Legends Z-A (exefs/main build 7222e13ecf6adb32: 1.0.0, 8a1c86c437394b69: 2.0.0,
         // b1f12fd919eae86a: 2.0.2): the start screen sets its files up from the player's packages (zaimport). Started
         // without a log redirect (a double click): the log goes to logs/play.log (the previous one: logs/play-anterior.log).
@@ -360,7 +384,13 @@ int main(int argc, char **argv) {
         snprintf(mp, sizeof mp, "%s/exefs/main", root);
         FILE *f = fopen(mp, "rb");
         if (f) { fseek(f, 0x40, SEEK_SET); if (fread(id, 1, 8, f) != 8) memset(id, 0, 8); fclose(f); }
-        if (!memcmp(id, za_build[0], 8) || !memcmp(id, za_build[1], 8) || !memcmp(id, za_build[2], 8)) {
+        // SwitchOS: Pokémon Legends: Arceus (main build aee8f150dda1b5a8, 1.1.1) gets the same log handling
+        static const uint8_t pla_build[8] = {0xae, 0xe8, 0xf1, 0x50, 0xdd, 0xa1, 0xb5, 0xa8};
+        bool za = !memcmp(id, za_build[0], 8) || !memcmp(id, za_build[1], 8) || !memcmp(id, za_build[2], 8);
+        rt_game_is_pla = !memcmp(id, pla_build, 8);
+        if (za) rt_game_name = "Pok\xc3\xa9mon Legends: Z-A";
+        if (rt_game_is_pla) rt_game_name = "Pok\xc3\xa9mon Legends: Arceus";
+        if (za || rt_game_is_pla) {
             // (the start screen is ZA Recomp's own since v0.1.9: shown on every start, set up or not - Play,
             // Mods, Saves; --play still goes straight into the game)
 #ifdef _WIN32
@@ -384,19 +414,19 @@ int main(int argc, char **argv) {
             // the button icons, if this copy never got them (set up before they existed): made aside for the next
             // start (runtime/ui/launcher.mm; not in scripted runs, which compare pictures)
             extern void launcher_prompts_kick(const char *root);
-            if (skip_launcher && !getenv("LARECOMP_INPUT") && !getenv("LARECOMP_HOST_INPUT"))
+            // (Z-A only: the icons are taken from Z-A's own packs by zaprompts; Arceus' files have none of them)
+            if (za && skip_launcher && !getenv("LARECOMP_INPUT") && !getenv("LARECOMP_HOST_INPUT"))
                 launcher_prompts_kick(root);
         }
     }
     log_system();
-    // SwitchOS (the hub's "Jogar" uses --play): straight into the game only while the game code there is the one
-    // wanted - after a runtime update or a mod's .pchtxt turned on/off, boot() would stop on "built for another
-    // version". Then the start screen comes up instead: it rebuilds the code (Play page) and goes on from there.
-    if (skip_launcher && !no_launcher && !getenv("LARECOMP_INPUT") && !gamelib_present(root)) {
-        fprintf(stderr, "[main] --play: the game code isn't built for these files/mods - start screen to build it\n");
-        skip_launcher = false;
-    }
     for (bool title = !skip_launcher;;) {
+        if (title && play) {  // ("Title screen" in the F1 menu, LARECOMP_REBOOT_AT=..:title: --play goes back to the hub)
+            fprintf(stderr, "[main] --play: back to the start screen requested - exiting to the hub\n");
+            backend_quit();   // (in the order closing the window uses, reboot_idle: render thread stopped, caches
+            bugrec_finish();  // kept, then the bug recording finished - that session is the report)
+            exit(0);
+        }
         if (title && no_launcher) {
             fprintf(stderr, "[main] LARECOMP_NO_LAUNCHER is set: not showing the start screen - exiting\n");
             exit(3);

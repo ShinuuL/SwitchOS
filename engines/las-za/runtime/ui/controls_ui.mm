@@ -9,6 +9,8 @@
 #include <string.h>
 
 #include "imgui.h"
+
+extern "C" bool rt_game_is_pla;  // (SwitchOS: Arceus - "SwitchOS" in its texts, runtime/main.c)
 #include "imgui_internal.h"  // (SetFocusID, NavCursorVisible)
 #include "option_rows.h"
 
@@ -447,7 +449,8 @@ extern "C" void controls_tab_draw(float scale) {
     {
         const char *const names[] = {TR("Game layout", "Layout do jogo"), TR("Controller convention", "Padrão do controle")};
         opt_choice(TR("Confirm button", "Botão de confirmar"), &g_settings.menu_confirm, names, 2, MENU_CONFIRM_CONTROLLER,
-                   TR("Which button confirms in ZA Recomp's menus.", "Qual botão confirma nos menus do ZA Recomp."));
+                   (rt_game_is_pla ? TR("Which button confirms in SwitchOS' menus.", "Qual botão confirma nos menus do SwitchOS.")
+                                   : TR("Which button confirms in ZA Recomp's menus.", "Qual botão confirma nos menus do ZA Recomp.")));
     }
 
     stick_mouse_rows();

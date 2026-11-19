@@ -124,7 +124,8 @@ struct GameState {
     dlcs: Vec<DlcInfo>,
     /// o time do save (Z-A e Arceus: party.rs)
     party: Vec<party::PartyMon>,
-    /// o runtime mudou desde a compilação: o código do jogo precisa ser compilado de novo (gamelib_stale)
+    /// o código do jogo precisa ser compilado de novo: o runtime mudou desde a compilação (gamelib_stale) ou o último
+    /// "Jogar" saiu dizendo que o código não serve (mod com .pchtxt ligado/desligado: launch::is_stale)
     needs_rebuild: bool,
 }
 
@@ -204,10 +205,11 @@ fn list_games() -> Vec<GameState> {
                 dlcs: dlcs_in(&dir),
                 party: match g.key {
                     "za" => party::load(&sd.join("main"), &Path::new(&cfg.runtime_dir).join("cache").join("party_icons"), &party::ZA),
-                    "arceus" => party::load(&sd.join("main"), &Path::new(&cfg.runtime_dir).join("cache").join("party_icons"), &party::ARCEUS),
+                    "arceus" => party::load(&sd.join("main"), &Path::new(&cfg.runtime_dir).join("cache").join(firstrun::icons_dir("arceus")), &party::ARCEUS),
                     _ => vec![],
                 },
-                needs_rebuild: dir.join("lasgame.dll").is_file() && gamelib_stale(Path::new(&cfg.runtime_dir), &dir),
+                needs_rebuild: dir.join("lasgame.dll").is_file()
+                    && (gamelib_stale(Path::new(&cfg.runtime_dir), &dir) || launch::is_stale(g.key)),
                 icon: fs::read(dir.join("icon.jpg")).ok().map(|b| {
                     use base64::Engine;
                     format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(b))
@@ -219,6 +221,10 @@ fn list_games() -> Vec<GameState> {
 
 // ------------------------------------------------------------------ jogar
 
+/// Começo fixo do erro do play_game quando o código do jogo precisa recompilar: o main.js reconhece por ele (não pelo
+/// texto) e leva à caixa do Recompilar
+const NEEDS_REBUILD: &str = "[needs-rebuild] ";
+
 #[tauri::command]
 fn play_game(key: String) -> Result<u32, String> {
     let cfg = get_config();
@@ -226,7 +232,35 @@ fn play_game(key: String) -> Result<u32, String> {
     if !g.supported {
         return Err(format!("{} ainda não roda no runtime do hub", g.name));
     }
-    launch::play(Path::new(&cfg.runtime_dir), &Path::new(&cfg.games_dir).join(g.key), runtime_processes())
+    let dir = Path::new(&cfg.games_dir).join(g.key);
+    // código desatualizado: nem abre (o runtime sairia sem janela); o main.js leva à caixa do Recompilar
+    if dir.join("lasgame.dll").is_file() && (gamelib_stale(Path::new(&cfg.runtime_dir), &dir) || launch::is_stale(g.key)) {
+        return Err(format!("{NEEDS_REBUILD}o código do jogo precisa ser recompilado"));
+    }
+    launch::play(g.key, Path::new(&cfg.runtime_dir), &dir, runtime_processes())
+}
+
+/// Como terminou o último "Jogar": {running} enquanto aberto, {code} ao fechar (stale: o código do jogo não serve,
+/// launch::PLAY_EXIT_STALE). null: nada aberto por este hub.
+#[tauri::command]
+fn play_exit(key: String) -> Option<serde_json::Value> {
+    launch::last_exit(&key).map(|c| match c {
+        None => serde_json::json!({ "running": true }),
+        Some(code) => serde_json::json!({ "running": false, "code": code, "stale": code == launch::PLAY_EXIT_STALE }),
+    })
+}
+
+/// Muda a ordem de um mod (`up`: sobe, vence os de baixo onde dois trocam o mesmo arquivo). Só com o jogo fechado:
+/// o runtime grava o larecomp.ini ao fechar e desfaria a mudança.
+#[tauri::command]
+fn move_mod(key: String, name: String, up: bool) -> Result<(), String> {
+    let g = game_def(&key)?;
+    match runtime_processes() {
+        Some(0) => {}
+        Some(_) => return Err("Feche o jogo antes de mudar a ordem dos mods.".into()),
+        None => return Err("Não consegui conferir se o jogo está aberto. Feche o jogo e tente de novo.".into()),
+    }
+    mods::move_mod(Path::new(&get_config().runtime_dir), g, &name, up)
 }
 
 /// Liga ou desliga um mod (pasta com/sem "_" em <runtime>/mods). Só com o jogo fechado.
@@ -242,7 +276,13 @@ fn set_mod_enabled(key: String, name: String, on: bool, state: tauri::State<Jobs
         Some(_) => return Err("Feche o jogo antes de ligar ou desligar mods: ele lê os mods ao abrir e pode estar usando os arquivos.".into()),
         None => return Err("Não consegui conferir se o jogo está aberto. Feche o jogo e tente de novo.".into()),
     }
-    mods::set(Path::new(&get_config().runtime_dir), &name, on)
+    let code = mods::set(Path::new(&get_config().runtime_dir), &name, on)?;
+    if code {
+        // o código que o jogo quer mudou: o "precisa recompilar" do último Jogar (código 4) já não vale; quem decide
+        // de novo é o runtime no próximo Jogar (sai com o código 4 se o código compilado não servir)
+        launch::clear_stale(&key);
+    }
+    Ok(code)
 }
 
 // ------------------------------------------------------------------ importar (zaimport + --build-game, em segundo plano)
@@ -450,7 +490,7 @@ fn import_game(key: String, packages: Vec<String>, state: tauri::State<Jobs>) ->
             j.pid = None;
             match r {
                 Err(_) if j.cancel => { j.step = "Cancelado".into(); j.error = Some(CANCELLED.into()); }
-                Ok(()) => { j.step = "Pronto para jogar".into(); j.progress = 1.0; }
+                Ok(()) => { j.step = "Pronto para jogar".into(); j.progress = 1.0; launch::clear_stale(&key); }
                 // "Falhou ao extrair" / "Falhou ao compilar": a etapa ajuda a explicar o erro
                 Err(e) => {
                     j.step = if j.step.starts_with("Compilando") { "Falhou ao compilar" } else { "Falhou ao extrair" }.into();
@@ -495,7 +535,7 @@ fn rebuild_game(key: String, state: tauri::State<Jobs>) -> Result<(), String> {
             j.pid = None;
             match r {
                 Err(_) if j.cancel => { j.step = "Cancelado".into(); j.error = Some(CANCELLED.into()); }
-                Ok(()) => { j.step = "Pronto para jogar".into(); j.progress = 1.0; }
+                Ok(()) => { j.step = "Pronto para jogar".into(); j.progress = 1.0; launch::clear_stale(&key); }
                 Err(e) => { j.step = "Falhou ao compilar".into(); j.error = Some(e); }
             }
         });
@@ -1108,7 +1148,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Jobs::default())
         .invoke_handler(tauri::generate_handler![
-            get_config, set_config, list_games, play_game, set_mod_enabled, import_game, rebuild_game, probe_packages, cancel_import, job_status, ensure_dir, mods_dir, check_paths, save_info,
+            get_config, set_config, list_games, play_game, play_exit, move_mod, set_mod_enabled, import_game, rebuild_game, probe_packages, cancel_import, job_status, ensure_dir, mods_dir, check_paths, save_info,
             restore_backup, saveimport::import_sources, saveimport::check_import, saveimport::import_save, firstrun::firstrun_status, firstrun::firstrun_run, sync::sync_save
         ])
         .run(tauri::generate_context!())

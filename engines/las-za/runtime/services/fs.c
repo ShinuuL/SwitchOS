@@ -452,7 +452,8 @@ static void layer_init(void) {
     if (nlayers >= 0) return;
     nlayers = 0;
     settings_load();
-    if (!g_game_is_la) verify_log();
+    extern bool rt_game_is_pla;  // (SwitchOS: Arceus - the check reads Z-A's packs; its "ok 2.0.2" was Z-A's, runtime/main.c)
+    if (!g_game_is_la && !rt_game_is_pla) verify_log();
     if (xbox_layer_prepare()) strlcpy(layer_root[nlayers++], XBOX_ATTACK_ROOT, sizeof *layer_root);
     const char *seed = rando_seed_dir();
     if (seed) snprintf(layer_root[nlayers++], sizeof *layer_root, "%s/romfs", seed);

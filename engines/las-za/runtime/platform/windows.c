@@ -654,8 +654,8 @@ static void log_to_file_without_console(void) {
 static void require_cpu(void) {
     __builtin_cpu_init();
     if (__builtin_cpu_supports("sse4.2") && __builtin_cpu_supports("popcnt")) return;
-    MessageBoxA(NULL, "ZA Recomp needs a CPU with SSE4.2 (Intel Core i3/i5/i7 / 2008 or newer, AMD Bulldozer / 2011 or "
-                "newer).", "ZA Recomp", MB_ICONERROR | MB_OK);
+    MessageBoxA(NULL, "This program needs a CPU with SSE4.2 (Intel Core i3/i5/i7 / 2008 or newer, AMD Bulldozer / 2011 "
+                "or newer).", "SwitchOS", MB_ICONERROR | MB_OK);  // (SwitchOS: before the game is known - neutral)
     ExitProcess(1);
 }
 
@@ -670,7 +670,8 @@ void plat_fatal_notice(void) {
     if (!g_log_path[0]) return;
     fflush(stderr);
     if (getenv("LARECOMP_HIDDEN")) return;  // (SwitchOS: a hidden test run - no window at all, the log has it)
-    MessageBoxA(NULL, text, "ZA Recomp", MB_ICONERROR | MB_OK);
+    extern bool rt_game_is_pla;  // (SwitchOS: Arceus' player never saw "ZA Recomp" - runtime/main.c)
+    MessageBoxA(NULL, text, rt_game_is_pla ? "SwitchOS" : "ZA Recomp", MB_ICONERROR | MB_OK);
 }
 
 // (profiling) LARECOMP_SAMPLE=<delay s>,<duration s>: after the delay, a thread samples the instruction pointer of
@@ -815,8 +816,9 @@ static DWORD WINAPI sampler_main(void *arg) {
     return 0;
 }
 
+extern bool rt_game_is_pla;  // (SwitchOS: Arceus - "SwitchOS" in its boxes, runtime/main.c)
 static DWORD WINAPI notice_thread(LPVOID text) {
-    if (!getenv("LARECOMP_HIDDEN")) MessageBoxA(NULL, text, "LAS Recomp", MB_ICONWARNING | MB_OK);  // (SwitchOS)
+    if (!getenv("LARECOMP_HIDDEN")) MessageBoxA(NULL, text, rt_game_is_pla ? "SwitchOS" : "ZA Recomp", MB_ICONWARNING | MB_OK);  // (SwitchOS)
     free(text);
     return 0;
 }

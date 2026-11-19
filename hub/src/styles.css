@@ -378,6 +378,8 @@ h2 { margin: 0 0 12px; font-size: var(--fs-label); font-weight: 750; letter-spac
 .list li.mod { align-items: center; }
 .mod-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .list li.mod.off strong { color: var(--ink-3); }
+.mod-acts { flex: none; display: flex; align-items: center; gap: 4px; }
+.btn.move { min-width: 36px; padding-inline: 8px; font-size: 0.8em; }
 .switch { flex: none; position: relative; width: 44px; height: 26px; padding: 0; border: 0; border-radius: 999px; cursor: pointer; background: color-mix(in oklch, var(--ink-3) 35%, transparent); transition: background-color 160ms ease; }
 .switch[aria-checked="true"] { background: var(--ok); }
 .switch-knob { position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--ink); transition: transform 160ms ease; }

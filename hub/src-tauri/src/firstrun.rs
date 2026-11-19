@@ -86,15 +86,15 @@ fn read(p: &Path) -> String {
 }
 
 /// O estado das três etapas a partir da pasta do runtime e do romfs.bin do jogo (sem rodar nada)
+/// A pasta dos ícones do time de cada jogo em <runtime>/cache (lib.rs party::load lê a mesma)
+pub fn icons_dir(key: &str) -> &'static str {
+    if key == "arceus" { "party_icons_pla" } else { "party_icons" }
+}
+
 fn status_in(key: &str, rt: &Path, romfs: &Path) -> FirstRun {
-    if key != "za" {
-        let why = if key == "arceus" { "Ainda não feito para o Arceus" } else { "Jogo sem suporte" };
-        return FirstRun {
-            verify: step("indisponivel", why),
-            icons: step("indisponivel", why),
-            shaders: step("indisponivel", if key == "arceus" { "Vêm prontos com o runtime" } else { why }),
-            can_run: false,
-        };
+    if key != "za" && key != "arceus" {
+        let why = "Jogo sem suporte";
+        return FirstRun { verify: step("indisponivel", why), icons: step("indisponivel", why), shaders: step("indisponivel", why), can_run: false };
     }
     if !romfs.is_file() {
         let s = step("pendente", "Importe o jogo primeiro");
@@ -103,6 +103,21 @@ fn status_in(key: &str, rt: &Path, romfs: &Path) -> FirstRun {
     let cache = rt.join("cache");
     let stamp = src_stamp(romfs).unwrap_or_default();
     let same = |src: &str| read(&cache.join(src)).split_whitespace().take(2).collect::<Vec<_>>().join(" ") == stamp;
+    let dir = icons_dir(key);
+    let icons = if cache.join(dir).join(".made").is_file() && same(&format!("{dir}.src")) {
+        step("feito", "Gerados")
+    } else {
+        step("pendente", "Ainda não gerados")
+    };
+    if key == "arceus" {
+        // (Arceus: só os ícones; o zaprompts não tem cópia de referência dos pacotes dele, e os shaders vêm com o runtime)
+        return FirstRun {
+            verify: step("indisponivel", "Ainda não feito para o Arceus"),
+            icons,
+            shaders: step("indisponivel", "Vêm prontos com o runtime"),
+            can_run: zaprompts(rt).is_file(),
+        };
+    }
 
     let head = read(&cache.join("verify.txt")).lines().next().unwrap_or("").to_string();
     let verify = if head.is_empty() || !same("verify.src") {
@@ -115,12 +130,6 @@ fn status_in(key: &str, rt: &Path, romfs: &Path) -> FirstRun {
         step("feito", format!("Versão {v} sem danos"))
     } else {
         step("feito", "Versão sem cópia de referência: não dá para verificar")
-    };
-
-    let icons = if cache.join("party_icons").join(".made").is_file() && same("party_icons.src") {
-        step("feito", "Gerados")
-    } else {
-        step("pendente", "Ainda não gerados")
     };
 
     let made = read(&cache.join("shader_code_game.bin.made"));
@@ -162,8 +171,8 @@ pub fn firstrun_run(key: String, steps: Vec<String>, state: tauri::State<Jobs>) 
     let (rt, romfs) = paths(&key)?;
     let st = status_in(&key, &rt, &romfs);
     if !st.can_run {
-        return Err(if key != "za" {
-            "primeira vez: só o Pokémon Z-A por enquanto".into()
+        return Err(if key != "za" && key != "arceus" {
+            "primeira vez: jogo sem suporte".into()
         } else if !romfs.is_file() {
             "primeira vez: importe o jogo primeiro".into()
         } else {
@@ -187,7 +196,7 @@ pub fn firstrun_run(key: String, steps: Vec<String>, state: tauri::State<Jobs>) 
     job_update(&jobs, &jk, |j| *j = Job { running: true, step: "Preparando".into(), ..Default::default() });
     let todo: Vec<String> = todo.into_iter().map(String::from).collect();
     std::thread::spawn(move || {
-        let r = run_steps(&jobs, &jk, &rt, &romfs, &todo);
+        let r = run_steps(&jobs, &jk, &rt, &romfs, &todo, icons_dir(&key));
         job_update(&jobs, &jk, |j| {
             j.running = false;
             j.pid = None;
@@ -200,7 +209,7 @@ pub fn firstrun_run(key: String, steps: Vec<String>, state: tauri::State<Jobs>) 
     Ok(())
 }
 
-fn run_steps(jobs: &Jobs, jk: &str, rt: &Path, romfs: &Path, todo: &[String]) -> Result<(), String> {
+fn run_steps(jobs: &Jobs, jk: &str, rt: &Path, romfs: &Path, todo: &[String], icons: &str) -> Result<(), String> {
     let tool = zaprompts(rt);
     let cache = rt.join("cache");
     fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
@@ -218,9 +227,10 @@ fn run_steps(jobs: &Jobs, jk: &str, rt: &Path, romfs: &Path, todo: &[String]) ->
             }
             "icons" => {
                 job_update(jobs, jk, |j| j.step = "Gerando os ícones dos Pokémon".into());
-                let _ = fs::remove_file(cache.join("party_icons").join(".made"));
-                fs::write(cache.join("party_icons.src"), &stamp).map_err(|e| e.to_string())?;
-                run_step(jobs, jk, &tool, rt, &["--romfs".as_ref(), romfs.as_os_str(), "--party-icons".as_ref(), "cache/party_icons".as_ref()], base, span)?;
+                let _ = fs::remove_file(cache.join(icons).join(".made"));
+                fs::write(cache.join(format!("{icons}.src")), &stamp).map_err(|e| e.to_string())?;
+                let out = format!("cache/{icons}");
+                run_step(jobs, jk, &tool, rt, &["--romfs".as_ref(), romfs.as_os_str(), "--party-icons".as_ref(), out.as_ref()], base, span)?;
             }
             "shaders" => {
                 job_update(jobs, jk, |j| j.step = "Preparando os shaders (até 2 min)".into());
@@ -281,7 +291,13 @@ mod tests {
         fs::write(c.join("party_icons.src"), "1 2").unwrap(); // (outro romfs)
         let st = status_in("za", &rt, &romfs);
         assert_eq!((st.verify.state.as_str(), st.icons.state.as_str()), ("feito", "pendente"));
-        assert_eq!(status_in("arceus", &rt, &romfs).icons.state, "indisponivel");
+        let pla = status_in("arceus", &rt, &romfs);
+        assert_eq!((pla.verify.state.as_str(), pla.icons.state.as_str(), pla.shaders.state.as_str()), ("indisponivel", "pendente", "indisponivel"));
+        fs::create_dir_all(c.join("party_icons_pla")).unwrap();
+        fs::write(c.join("party_icons_pla.src"), &stamp).unwrap();
+        fs::write(c.join("party_icons_pla").join(".made"), "683
+").unwrap();
+        assert_eq!(status_in("arceus", &rt, &romfs).icons.state, "feito");
         let _ = fs::remove_dir_all(&d);
     }
 }

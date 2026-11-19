@@ -673,7 +673,7 @@ def main():
     main_build = Nso(args.main or os.path.join(os.path.dirname(args.nso), 'main')).build_id[:16]
     # SwitchOS: Pokémon Legends: Arceus (main build IDs, first 16 hex digits): lifted as it is - no game patches yet, none
     # of Link's Awakening's (its address table would be wrong) nor its randomizer's. Its subsdk0/1 come here by name.
-    PLA_BUILDS = {'aee8f150dda1b5a8': '1.0.1'}
+    PLA_BUILDS = {'aee8f150dda1b5a8': '1.1.1'}
     if main_build in PLA_BUILDS:
         RANDO_CODE.clear()
         if args.name == 'main':

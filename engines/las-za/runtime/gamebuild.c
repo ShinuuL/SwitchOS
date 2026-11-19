@@ -1,5 +1,7 @@
 // Builds the game code library on the player's machine (runtime/gamebuild.h).
 #include "gamebuild.h"
+
+extern bool rt_game_is_pla;  // (SwitchOS: Pokémon Legends: Arceus - its player never sees "ZA Recomp", runtime/main.c)
 #include "gamesub.h"
 #include "build_cache.h"
 
@@ -452,7 +454,7 @@ static void helper_failed(const char *what, int r, const char *log, char *why, s
         // (nothing written at all: not disk space, which is what the start screen would say next - something stopped it as
         // it started, or it crashed there: #99, a generator that worked on every other PC. gamebuild_killed: this text is shown)
         snprintf(why, why_size, "A build helper stopped as soon as it started. An antivirus or Windows' exploit protection can "
-                 "do this: add the ZA Recomp folder as an exception and try again.");
+                 "do this: add the %s folder as an exception and try again.", rt_game_is_pla ? "SwitchOS" : "ZA Recomp");
         g_killed = true;
     }
     LOG("[gamebuild] %s failed: %s%s%s\n", what, how, how[0] && last[0] ? ": " : "", last);
@@ -640,7 +642,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     }
     Tools t;
     if (!find_tools(&t)) {
-        snprintf(why, why_size, "the game code builder is missing from this copy of ZA Recomp");
+        snprintf(why, why_size, "the game code builder is missing from this copy of %s", rt_game_is_pla ? "SwitchOS" : "ZA Recomp");
         return false;
     }
     char work[1100], tmp[1100];
@@ -997,7 +999,10 @@ bool modbuild_run(const char *game_dir, const char *nso, uint64_t base, char *ou
 #define MOD_PROGRESS(f, s) do { if (o && o->progress) o->progress(f, s); } while (0)
     MOD_PROGRESS(0, "Reading the mod's code...");
     Tools t;
-    if (!find_tools(&t)) { snprintf(why, why_size, "the game code builder is missing from this copy of ZA Recomp"); return false; }
+    if (!find_tools(&t)) {
+        snprintf(why, why_size, "the game code builder is missing from this copy of %s", rt_game_is_pla ? "SwitchOS" : "ZA Recomp");
+        return false;
+    }
     snprintf(work, sizeof work, "cache" SEP "mods" SEP "%s.work", stem);
     plat_remove_tree(work);
     mkdir(work, 0755);

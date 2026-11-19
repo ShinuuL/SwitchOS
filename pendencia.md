@@ -7,7 +7,7 @@ Atualizado em 19/11/2026.
 Foco (decidido em 19/11): os dois jogos que temos (Z-A e Arceus) no PC. Android e outros jogos ficam para depois.
 
 1. **Arceus a 60 fps no PC, como o Z-A.** Em andamento. Pista do Android: `main+0x277d838` liga o present interval 1, mas o mundo anda 2x mais rápido; falta ligar o passo do mundo ao tempo real (como o `FRAME_DT` do Z-A em `framepace.c`).
-2. **Arceus no PC:** ícones do time (o `zaprompts` não lê o romfs do Arceus), piscar de texturas e atraso nas cutscenes (estes dois precisam do usuário jogando).
+2. **Arceus no PC:** piscar de texturas e atraso nas cutscenes (estes dois precisam do usuário jogando).
 3. **Hub 0.0.2:** teste manual das telas novas (primeira vez, importar save, mods, recompilar).
 4. **Depois:** escala de resolução do Arceus no Android; outros jogos no runtime unificado.
 
@@ -19,14 +19,14 @@ Decisão: o hub (Tauri, `hub/`) continua sendo o aplicativo principal. A tela in
 
 - [x] Interface nova (tela de console: prateleira, time, abas, controle). Aprovada em 19/11; o hub já abre o recomp.
 - [x] Verificar os arquivos do jogo, gerar os ícones dos Pokémon e preparar os shaders: `firstrun.rs` (`firstrun_status` / `firstrun_run`, job `firstrun:<jogo>`), na aba Sobre do jogo. Mesmos arquivos e marcadores da tela do ZA Recomp (`cache/verify.*`, `cache/party_icons*`, `cache/shader_code_game.bin.*`). Só Z-A.
-- [ ] Avisar quando o runtime mudou e o jogo precisa ser recompilado (`lasgame.dll.id` diferente do `GAMELIB_ID`).
-- [ ] Importar saves (do Switch, do Ryujinx e de outras fontes).
-- [x] "Jogar" abre direto no jogo (`launch.rs`, `lasrecomp.exe --play <pasta>`; recusa se o jogo já está aberto). Falta recompilar o runtime com a mudança de `runtime/main.c`: com o código do jogo desatualizado (runtime novo, `.pchtxt` ligado/desligado) o `--play` volta para a tela inicial em vez de fechar com erro.
+- [x] Avisar quando o runtime mudou e o jogo precisa ser recompilado (`lasgame.dll.id` diferente do `GAMELIB_ID`).
+- [x] Importar saves (do Switch, do Ryujinx e de outras fontes).
+- [x] "Jogar" abre direto no jogo (`launch.rs`, `lasrecomp.exe --play <pasta>`; recusa se o jogo já está aberto). Runtime recompilado com a mudança de `runtime/main.c`: com o código do jogo desatualizado (runtime novo, `.pchtxt` ligado/desligado) o `--play` volta para a tela inicial em vez de fechar com erro.
 
 ## Hub: outros pontos
 
 - [x] **Time do save do Arceus no hub.** `party.rs` lê Z-A e Arceus (`party::ZA` / `party::ARCEUS`); teste com cópias dos saves: `PARTY_TEST_PLA=... PARTY_TEST_ZA=... cargo test --lib party` (Cyndaquil Nv. 5, Tepig Nv. 7).
-- [ ] Ícones do time do Arceus: o cache `party_icons` vem do romfs do Z-A, que não tem o Cyndaquil (o hub mostra a Poké Ball). Gerar ícones a partir do romfs do Arceus. O `zaprompts --party-icons` não serve: o romfs do Arceus não tem `arc/data.trpfs` ("no arc/data.trpfs / data.trpfd in it"); os ícones são BNTX soltos no romfs (`pokeicon_s_<espécie>_<forma>_000_n_00000000_fn_<n|r>.bntx`, também `pokeicon_l_`; o `pokeicon_s_0155` existe). Falta: modo novo no `prompt_textures.py` que leia BNTX soltos do romfs.bin, refazer o zaprompts congelado, pasta própria (ex. `cache/party_icons_pla`) e o nome no `party.rs`.
+- [x] Ícones do time do Arceus: `prompt_textures.py` (`pla_icons`) lê os BNTX soltos do romfs do Arceus (`bin/appli/res_pokemon/icon_pokemon_s`, 683 ícones; ficam de fora só variantes extras como `_011`/`_041`) para `cache/party_icons_pla`, com o nº da Pokédex como modelo (`party::ARCEUS.dex_icons`). O hub gera pela aba Sobre (`firstrun.rs`: no Arceus só a etapa dos ícones). `zaprompts` recongelado e trocado na distribuição (anterior em `build/exe-anterior/`).
 - [x] Hub usar o `zaimport --probe` (`probe<TAB>pacote<TAB>title id base<TAB>base|update|dlc`) para avisar antes de importar um NSP/XCI de outro jogo. Comando `probe_packages`; a aba Importação etiqueta cada arquivo (Jogo base, Atualização, DLC ou "É de ...") e confirma em linha antes de importar o que não é do jogo.
 - [x] Restaurar save pelo hub (`restore_backup`, em Rust, compatível com o `switchos.py backups` / `restore`): o save atual vira `*-pre-restore` antes. Teste ponta a ponta: `restore_e2e` (variáveis `RESTORE_E2E_*`, só com cópias).
 - [x] Ligar e desligar mods pelo hub (`mods.rs`, `set_mod_enabled`): renomeia com/sem `_`, tira de `mods_off` ao ligar, só com o jogo fechado. Falta teste manual na janela do hub.
@@ -36,7 +36,7 @@ Decisão: o hub (Tauri, `hub/`) continua sendo o aplicativo principal. A tela in
 - [ ] Arceus: piscar de texturas no chão.
 - [ ] Arceus: atraso para carregar os Pokémon nas cutscenes.
 - [ ] Arceus: verificar a história do começo ao fim jogando (na teoria, nada bloqueia).
-- [ ] `tools/gen.py`: o rótulo `PLA_BUILDS` diz 1.0.1, mas a build `aee8f150` é a 1.1.1. O `gen.py` entra no `GAMELIB_ID`: corrigir junto com a próxima mudança que já obrigue a recompilar.
+- [x] `tools/gen.py`: rótulo `PLA_BUILDS` corrigido para 1.1.1. GAMELIB_ID novo `965d7a15765fc205`; runtime, `lasgen` e os dois jogos recompilados (backups em `build/exe-anterior/`).
 - [ ] Confirmar no jogo os textos da tradução PT-BR parcial do Z-A.
 - [ ] Crash raro do Z-A: ponteiro nulo (`0xd0`) uma vez, ao abrir com DLC + tradução. Não se repetiu em 8 rodadas. Log em `ZA Recomp/logs/crash-raros/`.
 - [ ] Integrar ao runtime unificado os outros jogos: Sword/Shield, BDSP, TotK.

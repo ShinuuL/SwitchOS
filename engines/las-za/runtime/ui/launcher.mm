@@ -907,9 +907,11 @@ extern "C" int launcher_verify_state(void) {  // 0 nothing / not checked, 1 chec
     fclose(f);
     return !strncmp(head, "damaged", 7) ? 3 : !strncmp(head, "ok", 2) ? 2 : 0;
 }
+extern "C" bool rt_game_is_pla;
 static void launcher_verify_kick(void) {
     char tool[1100];
-    if (g_root.empty() || g_verify_proc || getenv("LARECOMP_NO_VERIFY")) return;
+    // (SwitchOS: Z-A's pack check only - Arceus' files have no Z-A packs; rt_game_is_pla: runtime/main.c)
+    if (g_root.empty() || g_verify_proc || getenv("LARECOMP_NO_VERIFY") || rt_game_is_pla) return;
     std::string romfs = file_exists(g_root + "/romfs.bin") ? g_root + "/romfs.bin" : g_root + "/romfs";
     std::string data = romfs + (is_dir(romfs) ? "/arc/data.trpfs" : "");
     char src[64] = "", had[64] = "";

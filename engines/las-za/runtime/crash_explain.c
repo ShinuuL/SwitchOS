@@ -114,7 +114,8 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
                                       "Your progress up to your last save or autosave is safe.";
     // (g_game_is_la is Link's Awakening's until the game's files are read: a crash on the start screen or while the
     // GPU starts said "LAS Recomp stopped", #159)
-    const char *app = g_game_is_la && rt_romfs_files >= 0 ? "LAS Recomp" : "ZA Recomp";
+    extern bool rt_game_is_pla;  // (SwitchOS: Pokémon Legends: Arceus, runtime/main.c - not "ZA Recomp" to its player)
+    const char *app = g_game_is_la && rt_romfs_files >= 0 ? "LAS Recomp" : rt_game_is_pla ? "SwitchOS" : "ZA Recomp";
     char head[160], what[600], dmg[32];
     extern void vk_compile_crash_note(void) __attribute__((weak));  // (Vulkan: was this thread compiling a pipeline?)
     if (vk_compile_crash_note && g_pc && rt_compile_crash_at(g_pc)) vk_compile_crash_note();
@@ -136,7 +137,7 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
     } else if (has("unsupported version of the game")) {
         snprintf(head, sizeof head, "Wrong version of the game");
         snprintf(what, sizeof what, "%s needs version %s of the game. Set up those game files on the start screen "
-                 "(Game Files).", app, g_game_is_la ? "1.0.0, 1.0.1 or 1.1.0" : "1.0.0, 2.0.0 or 2.0.2");
+                 "(Game Files).", app, g_game_is_la ? "1.0.0, 1.0.1 or 1.1.0" : rt_game_is_pla ? "1.1.1" : "1.0.0, 2.0.0 or 2.0.2");
     } else if (has("no font for the game's text")) {
         snprintf(head, sizeof head, "No font for the game's text");
         snprintf(what, sizeof what, "Import the Switch fonts in Settings (Game font), or reinstall %s - it "

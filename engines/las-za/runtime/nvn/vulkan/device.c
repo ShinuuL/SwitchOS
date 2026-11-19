@@ -2634,8 +2634,16 @@ void ui_window_init(void) {
         if (dx12_chosen) { g_settings.dx12 = false; settings_save(); g_settings.dx12 = true; }
     }
 #endif
-    window = SDL_CreateWindow("ZA Recomp", win_w, win_h, wflags);
+    // (SwitchOS: --play names the game, "<game> - SwitchOS"; Arceus never says ZA Recomp - runtime/main.c)
+    extern const char *rt_game_name;
+    extern bool rt_game_is_pla, g_play_mode;
+    char title[96];
+    if (rt_game_name && (g_play_mode || rt_game_is_pla))
+        snprintf(title, sizeof title, "%s \xe2\x80\x94 SwitchOS", rt_game_name);
+    else snprintf(title, sizeof title, "ZA Recomp");
+    window = SDL_CreateWindow(title, win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
+    LOG("[vk] window title: %s\n", SDL_GetWindowTitle(window));
     rt_window_icon(window);
     if (ENV("LARECOMP_WINDOW_POS")) {  // (two games side by side: local play tests)
         int x = 0, y = 0;

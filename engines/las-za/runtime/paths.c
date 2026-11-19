@@ -96,7 +96,7 @@ static bool writable(const char *dir) {
 
 static void fail(const char *msg) {
     fprintf(stderr, "%s\n", msg);
-    if (!getenv("LARECOMP_HIDDEN")) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "ZA Recomp", msg, NULL);  // (SwitchOS)
+    if (!getenv("LARECOMP_HIDDEN")) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "SwitchOS", msg, NULL);  // (SwitchOS: before the game is known - neutral)
     exit(1);
 }
 
@@ -322,11 +322,12 @@ void rt_paths_init(void) {
     char msg[1400];
     if (!is_dir(root) || !writable(root) || chdir(root) != 0) {
 #ifdef _WIN32
-        snprintf(msg, sizeof msg, "ZA Recomp can't write to its folder:\n%s\n\nIt keeps game files and saves "
-                 "next to the program. Move the \"ZA Recomp\" folder somewhere you can write to (e.g. Documents or "
+        // (SwitchOS: before the game is known - runtime/main.c reads it later - so no game's name)
+        snprintf(msg, sizeof msg, "The game can't write to its folder:\n%s\n\nIt keeps game files and saves "
+                 "next to the program. Move this program's folder somewhere you can write to (e.g. Documents or "
                  "Desktop, not Program Files) and start it again.", root);
 #else
-        snprintf(msg, sizeof msg, "ZA Recomp can't write to its data folder:\n%s", root);
+        snprintf(msg, sizeof msg, "The game can't write to its data folder:\n%s", root);
 #endif
         fail(msg);
     }

@@ -176,8 +176,8 @@ fn model(species: u32) -> Option<u32> {
 }
 
 /// o ícone da forma, senão o da forma base; o shiny, senão o normal (como party_icon na tela inicial)
-fn icon(icons: &Path, m: &PartyMon) -> Option<String> {
-    let mdl = if m.egg { 0 } else { model(m.species)? };
+fn icon(icons: &Path, m: &PartyMon, dex: bool) -> Option<String> {
+    let mdl = if m.egg { 0 } else if dex { m.species } else { model(m.species)? };
     let shinies: &[u32] = if m.shiny && !m.egg { &[1, 0] } else { &[0] };
     let forms = if m.egg { [0, 0, 0, 11] } else { [m.form, 11 + m.form, 0, 11] };
     for &sh in shinies {
@@ -201,12 +201,13 @@ pub struct Format {
     blk: usize,
     nick: usize,
     iv32: usize,   // bit 30 = ovo
+    dex_icons: bool, // ícones pelo nº da Pokédex nacional (Arceus: prompt_textures.py pla_icons), não pelo modelo do Z-A
 }
 
 /// Pokémon Legends: Z-A (PA9): bloco 0x3AA1A9AD, 6 slots de 0x1E0, blocos de 0x50
-pub const ZA: Format = Format { block: 0x3AA1A9AD, slot: 0x1E0, len: 0x158, enc_end: 0x148, blk: 0x50, nick: 0x58, iv32: 0x8C };
+pub const ZA: Format = Format { block: 0x3AA1A9AD, slot: 0x1E0, len: 0x158, enc_end: 0x148, blk: 0x50, nick: 0x58, iv32: 0x8C, dex_icons: false };
 /// Pokémon Legends: Arceus (PA8): bloco 0x2985FE5D, 6 slots de 0x178, blocos de 0x58 (tools/switchos/pla_party.py)
-pub const ARCEUS: Format = Format { block: 0x2985FE5D, slot: 0x178, len: 0x178, enc_end: 0x168, blk: 0x58, nick: 0x60, iv32: 0x94 };
+pub const ARCEUS: Format = Format { block: 0x2985FE5D, slot: 0x178, len: 0x178, enc_end: 0x168, blk: 0x58, nick: 0x60, iv32: 0x94, dex_icons: true };
 
 /// o save decifra e tem o bloco do time deste formato (o time pode estar vazio num save novo)
 pub fn has_party_block(save_main: &Path, f: &Format) -> bool {
@@ -250,7 +251,7 @@ pub fn load(save_main: &Path, icons: &Path, f: &Format) -> Vec<PartyMon> {
             egg: (rd32(&d[f.iv32..]) >> 30) & 1 == 1,
             icon: None,
         };
-        m.icon = icon(icons, &m);
+        m.icon = icon(icons, &m, f.dex_icons);
         out.push(m);
     }
     out

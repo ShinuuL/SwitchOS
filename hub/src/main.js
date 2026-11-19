@@ -905,19 +905,23 @@ const paneHTML = {
   mods: (g) => `
     <p class="lede">Os mods ficam na pasta de mods, cada um na sua pasta, e valem só para este jogo.</p>
     <ul class="list">${g.mods.length
-      ? g.mods.map((m) => `<li class="mod${m.on ? "" : " off"}">
+      ? g.mods.map((m, i) => `<li class="mod${m.on ? "" : " off"}">
           <span class="mod-name"><strong>${esc(m.name)}</strong><small>${m.files} arquivo${m.files === 1 ? "" : "s"}${m.code ? " · muda o código" : ""}</small></span>
+          <span class="mod-acts">${g.mods.length > 1 ? `
+            <button class="btn quiet move" type="button" data-move="up" data-name="${esc(m.name)}" aria-label="Subir ${esc(m.name)}" ${i === 0 ? "disabled" : ""}>▲</button>
+            <button class="btn quiet move" type="button" data-move="down" data-name="${esc(m.name)}" aria-label="Descer ${esc(m.name)}" ${i === g.mods.length - 1 ? "disabled" : ""}>▼</button>` : ""}
           <button class="switch" type="button" role="switch" aria-checked="${m.on}" data-mod="${esc(m.name)}"
-            data-code="${m.code ? 1 : ""}" aria-label="${m.on ? "Desligar" : "Ligar"} ${esc(m.name)}"><span class="switch-knob"></span></button>
+            data-code="${m.code ? 1 : ""}" aria-label="${m.on ? "Desligar" : "Ligar"} ${esc(m.name)}"><span class="switch-knob"></span></button></span>
         </li>`).join("")
       : `<li class="empty">Nenhum mod para este jogo ainda.</li>`}</ul>
     <button class="btn" data-mods-folder type="button">Abrir pasta de mods</button>
     <p class="fine">Ligue ou desligue com o jogo fechado. Desligado, a pasta ganha um "_" na frente e o jogo a ignora.</p>
+    ${g.mods.length > 1 ? `<p class="fine">Quando dois mods trocam o mesmo arquivo, vale o que está mais acima.</p>` : ""}
     <p class="fine">Formato técnico: <code>${esc(g.title_id)}/romfs</code>, o mesmo do Atmosphère.</p>`,
   save: (g) => `<div class="save" data-save-body>${saveHTML(g, saveCache[g.key])}</div>`,
   import: (g) => `${g.built && g.needs_rebuild && !jobs[g.key]?.running ? `
     <div class="actions ask-box rebuild">
-      <span class="ask">O SwitchOS foi atualizado e o código deste jogo precisa ser compilado de novo (10 a 30 min).
+      <span class="ask">O SwitchOS foi atualizado (ou um mod que muda código foi ligado ou desligado) e o código deste jogo precisa ser compilado de novo (10 a 30 min).
         Os arquivos do jogo e o save não mudam.</span>
       <button class="btn primary" data-rebuild type="button">Recompilar agora</button>
     </div>` : ""}
@@ -946,6 +950,17 @@ const paneWire = {
         const code = await invoke("set_mod_enabled", { key: g.key, name, on });
         toast(`${name} ${on ? "ligado" : "desligado"}.${code ? " Use Recompilar para o mod valer." : ""}`);
         await refresh();
+      } catch (e) { b.disabled = false; fail(e); }
+    }));
+    // ordem (mods_order do larecomp.ini, lib.rs move_mod): o foco segue o mod que andou
+    $$("[data-move]", p).forEach((b) => (b.onclick = async () => {
+      const { name, move } = b.dataset;
+      b.disabled = true;
+      try {
+        await invoke("move_mod", { key: g.key, name, up: move === "up" });
+        await refresh();
+        const next = $(`[data-move="${move}"][data-name="${CSS.escape(name)}"]`);
+        focusEl(next && !next.disabled ? next : $(`[data-mod="${CSS.escape(name)}"]`));
       } catch (e) { b.disabled = false; fail(e); }
     }));
   },
@@ -1077,14 +1092,38 @@ function hint(g) {
 /* ---------- ações ---------- */
 
 let playing = false;
+const NEEDS_REBUILD = "[needs-rebuild] "; // começo fixo do erro do play_game (lib.rs NEEDS_REBUILD)
 async function play() {
   const g = game();
   if (!g?.built || playing || restoring) return; // não abre o jogo no meio de uma restauração do save
+  // código desatualizado: o jogo nem abre (a tela inicial do ZA Recomp nunca aparece); vai direto à confirmação
+  if (g.needs_rebuild) return openRebuild();
   playing = true;
   renderGame();
   try { await invoke("play_game", { key: g.key }); }
-  catch (e) { playing = false; renderGame(); keepFocus(); return fail(e); } // falhou: libera na hora
+  catch (e) {
+    playing = false; renderGame(); keepFocus();
+    if (String(e).startsWith(NEEDS_REBUILD)) { await refresh(); return openRebuild(); }
+    return fail(e); // falhou: libera na hora
+  }
   setTimeout(() => { playing = false; renderGame(); }, 3000);
+  watchPlay(g.key);
+}
+
+// O runtime sai sem janela quando o código do jogo não serve (mod com .pchtxt mudou: lib.rs play_exit, código 4):
+// isso acontece nos primeiros segundos, então só esses são acompanhados
+function watchPlay(key) {
+  let n = 0;
+  const tick = async () => {
+    const r = await invoke("play_exit", { key }).catch(() => null);
+    if (r?.stale) {
+      await refresh();
+      if (current === key) openRebuild();
+      return toast("O código do jogo precisa ser recompilado antes de jogar.");
+    }
+    if (r?.running && ++n < 30) setTimeout(tick, 1000);
+  };
+  setTimeout(tick, 1000);
 }
 
 function openFolder() {

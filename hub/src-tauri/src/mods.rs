@@ -4,6 +4,8 @@
 //! "_" ou "." ou quando ela está em `mods_off` do larecomp.ini (lista separada por "|", a página Mods da tela inicial
 //! do ZA Recomp). O hub desliga renomeando para "_<nome>" e liga tirando o "_" (e o nome de `mods_off`, se estiver lá).
 //! Só com o jogo fechado: o runtime lê os mods no boot e, aberto, pode estar com arquivos deles em uso.
+//! A ordem é a `mods_order` do mesmo ini (nomes por "|"; os fora dela depois, por nome): o primeiro vence onde dois
+//! trocam o mesmo arquivo (services/fs.c mod_rank). A tela inicial a mudava; agora o hub (move_mod).
 
 use serde::Serialize;
 use std::fs;
@@ -57,17 +59,92 @@ fn has_code(mod_dir: &Path, g: &GameDef) -> bool {
     })
 }
 
-/// mods_off do larecomp.ini (pasta de dados do runtime)
-fn mods_off(runtime_dir: &Path) -> Vec<String> {
+/// Uma lista "a|b|c" do larecomp.ini (pasta de dados do runtime): mods_off, mods_order
+fn ini_list(runtime_dir: &Path, key: &str) -> Vec<String> {
     fs::read_to_string(runtime_dir.join("larecomp.ini"))
         .ok()
         .and_then(|t| {
             t.lines().find_map(|l| {
                 let (k, v) = l.split_once('=')?;
-                (k.trim() == "mods_off").then(|| v.trim().split('|').filter(|s| !s.is_empty()).map(String::from).collect())
+                (k.trim() == key).then(|| v.trim().split('|').filter(|s| !s.is_empty()).map(String::from).collect())
             })
         })
         .unwrap_or_default()
+}
+
+fn mods_off(runtime_dir: &Path) -> Vec<String> {
+    ini_list(runtime_dir, "mods_off")
+}
+
+/// Grava `key = value` no larecomp.ini, mantendo o resto como está (sem a linha: acrescenta; sem o arquivo: cria só
+/// com ela - o runtime completa os outros valores com os padrões ao ler)
+fn ini_set(runtime_dir: &Path, key: &str, value: &str) -> Result<(), String> {
+    let ini = runtime_dir.join("larecomp.ini");
+    let text = fs::read_to_string(&ini).unwrap_or_default();
+    let mut found = false;
+    let mut out: Vec<String> = text
+        .split_inclusive('\n')
+        .map(|l| match l.split_once('=') {
+            Some((k, _)) if k.trim() == key && !found => {
+                found = true;
+                let eol = if l.ends_with("\r\n") { "\r\n" } else if l.ends_with('\n') { "\n" } else { "" };
+                format!("{key} = {value}{eol}")
+            }
+            _ => l.to_string(),
+        })
+        .collect();
+    if !found {
+        let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        if !text.is_empty() && !text.ends_with('\n') {
+            out.push(eol.to_string());
+        }
+        out.push(format!("{key} = {value}{eol}"));
+    }
+    fs::write(&ini, out.concat()).map_err(|e| format!("não consegui gravar {}: {e}", ini.display()))
+}
+
+/// Lugar do mod na mods_order (fora dela: depois de todos), como o mod_rank do runtime
+fn rank(order: &[String], name: &str) -> usize {
+    order.iter().position(|o| o == name).unwrap_or(usize::MAX)
+}
+
+/// Sobe (`up`) ou desce o mod `name` uma posição entre os mods deste jogo e grava a mods_order inteira (os deste
+/// jogo na ordem nova, depois os de outros jogos que já estavam lá). Quem chama garante que o jogo está fechado.
+pub(crate) fn move_mod(runtime_dir: &Path, g: &GameDef, name: &str, up: bool) -> Result<(), String> {
+    let mut names: Vec<String> = list(runtime_dir, g).into_iter().map(|m| m.name).collect();
+    let i = names.iter().position(|n| n == name).ok_or_else(|| format!("o mod {name} não está mais na pasta de mods"))?;
+    let j = if up { i.checked_sub(1) } else { Some(i + 1).filter(|&j| j < names.len()) };
+    let Some(j) = j else { return Ok(()) }; // já na ponta
+    names.swap(i, j);
+    // os de outros jogos só enquanto a pasta existe (ligada ou com o "_" de desligada): nomes de mods apagados não
+    // ocupam o limite da linha
+    let mods = runtime_dir.join("mods");
+    let rest: Vec<String> = ini_list(runtime_dir, "mods_order")
+        .into_iter()
+        .filter(|o| !names.contains(o) && valid_name(o) && (mods.join(o).is_dir() || mods.join(format!("_{o}")).is_dir()))
+        .collect();
+    names.extend(rest);
+    ini_set(runtime_dir, "mods_order", &fit_order(&names))
+}
+
+/// Tamanho máximo da mods_order: o runtime a lê num char[1024] (settings.c, val e g_settings.mods_order)
+const ORDER_MAX: usize = 1023;
+
+/// "a|b|c" sem passar de ORDER_MAX bytes: corta nomes inteiros do fim (os de baixo, que sem lugar vão para o fim por
+/// nome - o mesmo que já acontecia com eles)
+fn fit_order(names: &[String]) -> String {
+    let mut out = String::new();
+    for n in names {
+        let extra = n.len() + usize::from(!out.is_empty());
+        if out.len() + extra > ORDER_MAX {
+            break;
+        }
+        if !out.is_empty() {
+            out.push('|');
+        }
+        out.push_str(n);
+    }
+    out
 }
 
 /// Tira `name` de mods_off no larecomp.ini, mantendo o resto do arquivo como está
@@ -96,9 +173,11 @@ fn remove_from_mods_off(runtime_dir: &Path, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Os mods deste jogo em <runtime>/mods, ligados e desligados, por nome
+/// Os mods deste jogo em <runtime>/mods, ligados e desligados, na ordem em que o runtime os põe (mods_order, depois
+/// por nome)
 pub(crate) fn list(runtime_dir: &Path, g: &GameDef) -> Vec<ModInfo> {
     let off = mods_off(runtime_dir);
+    let order = ini_list(runtime_dir, "mods_order");
     let mut out = vec![];
     if let Ok(rd) = fs::read_dir(runtime_dir.join("mods")) {
         for e in rd.flatten() {
@@ -119,7 +198,8 @@ pub(crate) fn list(runtime_dir: &Path, g: &GameDef) -> Vec<ModInfo> {
             }
         }
     }
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    // (o runtime compara os nomes byte a byte, strcmp; aqui sem o "_", para um mod desligado não pular de lugar)
+    out.sort_by(|a, b| rank(&order, &a.name).cmp(&rank(&order, &b.name)).then_with(|| a.name.cmp(&b.name)));
     out
 }
 
@@ -261,5 +341,38 @@ mod tests {
         set(&rt, "Cores", false).unwrap();
         assert!(rt.join("mods/_Cores").is_dir());
         let _ = fs::remove_dir_all(&rt);
+    }
+
+    #[test]
+    fn ordem_dos_mods() {
+        let rt = scratch("order");
+        mk_mod(&rt, "A", false);
+        mk_mod(&rt, "B", false);
+        mk_mod(&rt, "_C", false);
+        let names = |rt: &Path| list(rt, za()).into_iter().map(|m| m.name).collect::<Vec<_>>();
+        assert_eq!(names(&rt), ["A", "B", "C"]);
+        // sem ini: cria só com a linha
+        move_mod(&rt, za(), "C", true).unwrap();
+        assert_eq!(names(&rt), ["A", "C", "B"]);
+        assert_eq!(fs::read_to_string(rt.join("larecomp.ini")).unwrap(), "mods_order = A|C|B\n");
+        // com ini: troca a linha e mantém o resto; nomes de outros jogos ficam no fim (os de pasta apagada saem)
+        fs::create_dir_all(rt.join("mods").join("Outro")).unwrap(); // (sem romfs/ do Z-A: de outro jogo)
+        fs::write(rt.join("larecomp.ini"), "x = 1\r\nmods_order = Sumido|Outro|B\r\ny = 2").unwrap();
+        assert_eq!(names(&rt), ["B", "A", "C"]);
+        move_mod(&rt, za(), "B", false).unwrap();
+        assert_eq!(fs::read_to_string(rt.join("larecomp.ini")).unwrap(), "x = 1\r\nmods_order = A|B|C|Outro\r\ny = 2");
+        move_mod(&rt, za(), "A", true).unwrap(); // já no topo: nada muda
+        assert_eq!(names(&rt), ["A", "B", "C"]);
+        assert!(move_mod(&rt, za(), "Sumiu", true).is_err());
+        let _ = fs::remove_dir_all(&rt);
+    }
+
+    #[test]
+    fn ordem_no_limite() {
+        let n: Vec<String> = (0..200).map(|i| format!("mod{i:03}")).collect(); // 200 x 6 + 199 "|": passa de 1023
+        let s = fit_order(&n);
+        assert!(s.len() <= ORDER_MAX && s.starts_with("mod000|mod001") && !s.ends_with('|'));
+        assert_eq!(s.split('|').count(), 146); // 146 x 7 - 1 = 1021 (147: 1028)
+        assert_eq!(fit_order(&n[..2]), "mod000|mod001");
     }
 }

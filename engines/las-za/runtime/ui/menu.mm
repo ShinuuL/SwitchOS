@@ -1134,24 +1134,31 @@ static void tab_audio(void) {
 // Quit: back to the start screen (in game: the game reboots to it) or out to the desktop. Each asks first (progress
 // since the last save is lost); B / Esc or Cancel backs out.
 extern "C" void rt_request_reboot(int kind);  // runtime/main.c (RT_REBOOT_TITLE = 2: the start screen)
+// SwitchOS: started by the hub's "Jogar" (main.c --play), where the start screen never comes up: "Quit to Start Screen"
+// ends the process (main.c, RT_REBOOT_TITLE) and the player is back on the hub - so it says that, and "Quit to
+// Desktop" (the same exit) is left out
+extern "C" { bool g_play_mode; }
 static void tab_quit(float scale, bool in_game) {
     static int ask;  // 0: the two choices; 1: start screen?; 2: desktop?
     if (ask && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
         ask = 0;
     const char *lost = in_game ? TR("\n\nProgress since your last save is lost.", "\n\nO progresso desde o último save se perde.") : "";
     char d1[300], d2[300];
-    snprintf(d1, sizeof d1, "%s%s", TR("Leaves the game and goes back to the ZA Recomp start screen.",
-                                       "Sai do jogo e volta para a tela inicial do ZA Recomp."), lost);
+    snprintf(d1, sizeof d1, "%s%s", g_play_mode ? TR("Closes the game and goes back to the SwitchOS hub.",
+                                                     "Fecha o jogo e volta para o hub do SwitchOS.")
+                                                : TR("Leaves the game and goes back to the ZA Recomp start screen.",
+                                                     "Sai do jogo e volta para a tela inicial do ZA Recomp."), lost);
     snprintf(d2, sizeof d2, "%s%s", TR("Closes ZA Recomp.", "Fecha o ZA Recomp."), lost);
     opt_begin("##quit", scale);
     opt_section(TR("Quit", "Sair"));
     if (!ask) {
         if (!in_game) opt_disable_next();  // (already on it)
-        if (opt_action(TR("Quit to Start Screen", "Sair para a tela inicial"), "",
+        if (opt_action(g_play_mode ? TR("Back to the hub", "Voltar ao hub") : TR("Quit to Start Screen", "Sair para a tela inicial"), "",
                        in_game ? d1 : TR("You're on the start screen.", "Você já está na tela inicial."))) ask = 1;
-        if (opt_action(TR("Quit to Desktop", "Sair para a área de trabalho"), "", d2)) ask = 2;
+        if (!g_play_mode && opt_action(TR("Quit to Desktop", "Sair para a área de trabalho"), "", d2)) ask = 2;
     } else {
-        if (opt_action(ask == 1 ? TR("Yes, quit to Start Screen", "Sim, sair para a tela inicial")
+        if (opt_action(ask == 1 ? (g_play_mode ? TR("Yes, back to the hub", "Sim, voltar ao hub")
+                                               : TR("Yes, quit to Start Screen", "Sim, sair para a tela inicial"))
                                 : TR("Yes, quit to Desktop", "Sim, sair para a área de trabalho"), "", ask == 1 ? d1 : d2)) {
             settings_save();
             rs_take(&g_rs);  // (leaving the game: what's set now applies at the next Play - nothing to ask)

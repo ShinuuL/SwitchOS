@@ -335,11 +335,62 @@ if args.maxlod:
     with open(os.path.join(new, '.made'), 'w') as f: f.write('%d\n' % len(trpfs))
     sys.exit(0)
 
+def romfs_loose(romfs, folder):
+    """-> {name: bytes} of the files right in FOLDER, from a romfs folder or a RomFS image (as open_game)"""
+    if os.path.isdir(romfs):
+        p = os.path.join(romfs, *folder.split('/'))
+        if not os.path.isdir(p): return {}
+        return {n: open(os.path.join(p, n), 'rb').read() for n in os.listdir(p)}
+    with open(romfs, 'rb') as f:
+        img = memoryview(mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ))
+    h = struct.unpack_from('<10Q', img, 0)
+    dm, fm, data = img[h[3]:h[3] + h[4]], img[h[7]:h[7] + h[8]], h[9]
+    paths = {}
+
+    def dir_path(d):
+        if d not in paths:
+            parent, = struct.unpack_from('<I', dm, d)
+            nl, = struct.unpack_from('<I', dm, d + 0x14)
+            me = bytes(dm[d + 0x18:d + 0x18 + nl]).decode()
+            paths[d] = (dir_path(parent) + '/' + me).lstrip('/') if d else ''
+        return paths[d]
+    got, o = {}, 0
+    while o + 0x20 <= len(fm):
+        parent, _, off, size, _, nl = struct.unpack_from('<IIQQII', fm, o)
+        if dir_path(parent) == folder:
+            got[bytes(fm[o + 0x20:o + 0x20 + nl]).decode()] = bytes(img[data + off:data + off + size])
+        o += 0x20 + ((nl + 3) & ~3)
+    return got
+
+
+# Legends: Arceus (the hub's team, hub/src-tauri/src/party.rs): its box icons are loose BNTX files,
+# bin/appli/res_pokemon/icon_pokemon_s/pokeicon_s_<dex>_<form>_000_n_00000000_fn_<n|r>.bntx (r = shiny; 128x128 BC7),
+# saved under Z-A's names with the National Dex number as the model (pm<dex>_<form>_00_00_<0|1>). 0 = not Arceus.
+def pla_icons(romfs):
+    import texture2ddecoder
+    rxp, made = re.compile(r'^pokeicon_s_(\d{4})_(\d{3})_000_n_00000000_fn_([nr])\.bntx$'), 0
+    for fn, d in romfs_loose(romfs, 'bin/appli/res_pokemon/icon_pokemon_s').items():
+        mt = rxp.match(fn)
+        if not mt or d[:4] != b'BNTX': continue
+        for _, w, h, fmt, bh, data in bntx_textures(d):
+            if (fmt >> 8) != 0x20: continue  # (BC7)
+            wb, hb = (w + 3) // 4, (h + 3) // 4
+            raw = texture2ddecoder.decode_bc7(deswizzle_np(data, wb, hb, 16, bh), wb * 4, hb * 4)
+            im = Image.frombytes('RGBA', (wb * 4, hb * 4), raw, 'raw', 'BGRA').crop((0, 0, w, h))
+            name = 'pm%s_%02d_00_00_%d' % (mt[1], int(mt[2]), mt[3] == 'r')
+            im.resize((96, 96), Image.LANCZOS).save(os.path.join(args.party_icons, name + '.png'))
+            made += 1
+            break
+    return made
+
+
 if args.party_icons:
     import texture2ddecoder
     os.makedirs(args.party_icons, exist_ok=True)
     rx, made = re.compile(r'^pm\d{4}_\d\d_00_00_[01]$'), 0
     for romfs in args.romfs:
+        made += pla_icons(romfs)
+        if made: continue  # (Legends: Arceus: no data.trpfs, its icons are loose BNTX files - pla_icons)
         m = open_game(romfs)[0]
         fb = FB(m)
         root = fb.u64(8)
