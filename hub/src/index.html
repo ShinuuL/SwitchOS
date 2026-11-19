@@ -12,7 +12,21 @@
     <div class="ambient" aria-hidden="true"><div class="amb" data-amb="0"></div><div class="amb" data-amb="1"></div></div>
 
     <header class="topbar">
-      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><strong>SwitchOS</strong></div>
+      <div class="brand">
+        <!-- marca do SwitchOS (a mesma de src-tauri/app-icon.svg): três vias emolduradas -->
+        <svg class="brand-mark" viewBox="0 0 100 100" aria-hidden="true">
+          <defs>
+            <linearGradient id="bm-night" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1f2a3d"/><stop offset="1" stop-color="#0b0f16"/></linearGradient>
+            <linearGradient id="bm-cyan" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8af3f1"/><stop offset="1" stop-color="#2fb7d6"/></linearGradient>
+          </defs>
+          <rect width="100" height="100" rx="22" fill="url(#bm-night)"/>
+          <rect x="15" y="15" width="70" height="70" rx="18.5" fill="none" stroke="url(#bm-cyan)" stroke-width="5"/>
+          <path d="M50 30 L70.5 65 L29.5 65 Z" fill="none" stroke="#eef1f6" stroke-opacity="0.55" stroke-width="5" stroke-linejoin="round"/>
+          <circle cx="50" cy="53.4" r="7.6" fill="url(#bm-cyan)"/>
+          <circle cx="50" cy="30" r="8.6" fill="#eef1f6"/><circle cx="70.5" cy="65" r="8.6" fill="#eef1f6"/><circle cx="29.5" cy="65" r="8.6" fill="#eef1f6"/>
+        </svg>
+        <strong>SwitchOS</strong>
+      </div>
       <div class="sys">
         <time id="clock"></time>
         <button class="icon-btn" id="open-settings" type="button" aria-label="Configurações" title="Configurações">

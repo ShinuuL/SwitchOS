@@ -1,15 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The launcher's foreground layer: the logo's mark (docs/images/icon.svg, the same mark the README's logo and
-     the desktop app's icon carry), drawn in the 72 dp safe zone of the 108 dp canvas. The three shapes are the
-     mark's, in the mark's order: the purple bar, then the white rectangle's outline, then the orange one. -->
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- Camada da frente do ícone adaptativo: a marca do SwitchOS ("três vias, emoldurado", a mesma de
+     hub/src-tauri/app-icon.svg), em 63 dp centrados no canvas de 108 dp, para a moldura caber na zona segura de 66 dp. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <group android:scaleX="0.72" android:scaleY="0.72" android:translateX="18" android:translateY="18">
-        <path android:fillColor="#8A88FF" android:pathData="M50,32 L68,32 L68,68 L50,68 Z" />
-        <path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="6"
-            android:pathData="M22,32 L58,32 A10,10 0 0 1 68,42 L68,58 A10,10 0 0 1 58,68 L22,68 A10,10 0 0 1 12,58 L12,42 A10,10 0 0 1 22,32 Z" />
-        <path android:fillColor="#00000000" android:strokeColor="#FF8A00" android:strokeWidth="6"
-            android:pathData="M60,14 L72,14 A10,10 0 0 1 82,24 L82,76 A10,10 0 0 1 72,86 L60,86 A10,10 0 0 1 50,76 L50,24 A10,10 0 0 1 60,14 Z" />
+    <group android:scaleX="0.63" android:scaleY="0.63" android:translateX="22.5" android:translateY="22.5">
+        <path android:fillColor="#00000000" android:strokeWidth="4.4" android:pathData="M33.5,15 L66.5,15 A18.5,18.5 0 0 1 85,33.5 L85,66.5 A18.5,18.5 0 0 1 66.5,85 L33.5,85 A18.5,18.5 0 0 1 15,66.5 L15,33.5 A18.5,18.5 0 0 1 33.5,15 Z">
+            <aapt:attr name="android:strokeColor"><gradient android:type="linear" android:startX="15" android:startY="15" android:endX="85" android:endY="85" android:startColor="#FF8AF3F1" android:endColor="#FF2FB7D6" /></aapt:attr>
+        </path>
+        <path android:fillColor="#00000000" android:strokeColor="#8CEEF1F6" android:strokeWidth="4.6" android:strokeLineJoin="round" android:pathData="M50,30 L70.5,65 L29.5,65 Z" />
+        <path android:pathData="M42.4,53.4 a7.6,7.6 0 1,0 15.2,0 a7.6,7.6 0 1,0 -15.2,0 Z">
+            <aapt:attr name="android:fillColor"><gradient android:type="linear" android:startX="15" android:startY="15" android:endX="85" android:endY="85" android:startColor="#FF8AF3F1" android:endColor="#FF2FB7D6" /></aapt:attr>
+        </path>
+        <path android:fillColor="#FFEEF1F6" android:pathData="M41.8,30 a8.2,8.2 0 1,0 16.4,0 a8.2,8.2 0 1,0 -16.4,0 Z M62.3,65 a8.2,8.2 0 1,0 16.4,0 a8.2,8.2 0 1,0 -16.4,0 Z M21.3,65 a8.2,8.2 0 1,0 16.4,0 a8.2,8.2 0 1,0 -16.4,0 Z" />
     </group>
 </vector>

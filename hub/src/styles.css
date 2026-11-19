@@ -113,7 +113,7 @@ body.nav-key .tabs button[aria-selected="true"]:focus, .tabs button[aria-selecte
 .topbar { display: flex; align-items: center; justify-content: space-between; padding: calc(22 * var(--s)) var(--pad) 0; }
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand strong { font-size: calc(21 * var(--s)); font-weight: 750; letter-spacing: -0.01em; }
-.brand-mark { width: calc(22 * var(--s)); height: calc(22 * var(--s)); border-radius: calc(7 * var(--s)); background: conic-gradient(from 210deg, var(--game), oklch(85% 0.12 195), var(--game)); box-shadow: 0 2px 8px -2px oklch(0% 0 0 / 0.6); transition: background 600ms var(--ease-out); }
+.brand-mark { display: block; flex: none; width: calc(28 * var(--s)); height: calc(28 * var(--s)); border-radius: calc(7 * var(--s)); box-shadow: 0 2px 8px -2px oklch(0% 0 0 / 0.6), inset 0 0 0 1px var(--edge); }
 .sys { display: flex; align-items: center; gap: 18px; }
 #clock { color: var(--ink-2); font-size: var(--fs-body); font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: 0.01em; }
 .icon-btn { display: grid; place-items: center; width: calc(40 * var(--s)); height: calc(40 * var(--s)); border: 0; border-radius: 50%; background: transparent; color: var(--ink-2); transition: background 160ms ease, color 160ms ease, transform 120ms var(--ease-out); }
