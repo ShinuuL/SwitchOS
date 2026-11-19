@@ -25,6 +25,8 @@ Decisão: o hub (Tauri, `hub/`) continua sendo o aplicativo principal. A tela in
 
 ## Hub: outros pontos
 
+- [ ] **Pacote único hub + runtime para instalar em outro PC.** Hoje `npx tauri build` gera só o hub (`bundle/nsis/SwitchOS Hub_<versão>_x64-setup.exe` e `.msi`); o runtime (`lasrecomp.exe`, `lasgen/`, `zaprompts/`, `gamelib.id`, DLLs) fica em `build/dist-za/ZA Recomp`, achado pelas configurações. Fazer um empacotamento que não apague `build/dist-za` (o `dist.sh` faz `rm -rf` e leva os saves): montar numa pasta de staging própria, embutir o runtime como recurso do instalador do Tauri (ou instalar em pasta ao lado) e o hub já vir configurado com o `runtime_dir`. Sem arquivos da Nintendo, sem saves e sem `cache/` do usuário.
+
 - [x] **Time do save do Arceus no hub.** `party.rs` lê Z-A e Arceus (`party::ZA` / `party::ARCEUS`); teste com cópias dos saves: `PARTY_TEST_PLA=... PARTY_TEST_ZA=... cargo test --lib party` (Cyndaquil Nv. 5, Tepig Nv. 7).
 - [x] Ícones do time do Arceus: `prompt_textures.py` (`pla_icons`) lê os BNTX soltos do romfs do Arceus (`bin/appli/res_pokemon/icon_pokemon_s`, 683 ícones; ficam de fora só variantes extras como `_011`/`_041`) para `cache/party_icons_pla`, com o nº da Pokédex como modelo (`party::ARCEUS.dex_icons`). O hub gera pela aba Sobre (`firstrun.rs`: no Arceus só a etapa dos ícones). `zaprompts` recongelado e trocado na distribuição (anterior em `build/exe-anterior/`).
 - [x] Hub usar o `zaimport --probe` (`probe<TAB>pacote<TAB>title id base<TAB>base|update|dlc`) para avisar antes de importar um NSP/XCI de outro jogo. Comando `probe_packages`; a aba Importação etiqueta cada arquivo (Jogo base, Atualização, DLC ou "É de ...") e confirma em linha antes de importar o que não é do jogo.
