@@ -6,10 +6,11 @@ Atualizado em 19/11/2026.
 
 Foco (decidido em 19/11): os dois jogos que temos (Z-A e Arceus) no PC. Android e outros jogos ficam para depois.
 
-1. **Arceus a 60 fps no PC, como o Z-A.** Em andamento. Pista do Android: `main+0x277d838` liga o present interval 1, mas o mundo anda 2x mais rápido; falta ligar o passo do mundo ao tempo real (como o `FRAME_DT` do Z-A em `framepace.c`).
-2. **Arceus no PC:** travadas de ~1,3 s na câmera de arremesso da captura. Listras no chão e atraso nas cutscenes em espera.
-3. **Hub 0.0.2:** teste manual das telas novas (primeira vez, importar save, mods, recompilar).
-4. **Depois:** escala de resolução do Arceus no Android; outros jogos no runtime unificado.
+1. **Arceus no PC:** travadas de ~1,3 s na câmera de arremesso da captura (gravação de 19/11, ~8:10). Listras no chão e atraso nas cutscenes em espera.
+2. **Pacote único hub + runtime** para instalar em outro PC (ver Hub: outros pontos).
+3. **Detalhes:** "LAS Recomp" em `paths.c` (310, 560, 722); tela do ZA Recomp com textos do Z-A quando o Arceus é aberto sem o hub; aviso do 60 fps por cima da caixa de diálogo.
+4. **Testes do usuário:** `testes-manuais.md`.
+5. **Depois:** Android (escala de resolução do Arceus, controles na tela, sincronização de saves); outros jogos no runtime unificado.
 
 Dumps em `D:\Games\Dumps`, organizados por jogo (`Arceus/`, `Z-A/`: Base, Atualizacao, DLC, Traducao); `prod.keys` e `title.keys` na raiz.
 
