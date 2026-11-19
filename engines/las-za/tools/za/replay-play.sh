@@ -7,6 +7,10 @@ N=${1:?usage: replay-play.sh <name> [seconds]}
 T=${2:-0}
 : "${EXE:?set EXE to lasrecomp.exe}" "${GAME:?set GAME to your game files (exefs + romfs.bin)}"
 WORK=${WORK:-$PWD}
+# (absolute before the cd into WORK below: a relative EXE or GAME would point nowhere from there)
+[ -f "$EXE" ] || { echo "no EXE at $EXE"; exit 1; }
+EXE="$(cd "$(dirname "$EXE")" && pwd)/$(basename "$EXE")"
+[ -e "$GAME" ] && GAME="$(cd "$GAME" && pwd)"
 P=$WORK/replays/$N
 [ -f "$P/input.txt" ] || { echo "no recording $P"; exit 1; }
 cd "$WORK" || exit 1

@@ -223,8 +223,15 @@ void bugrec_start(const char *root) {
     snprintf(g_dir, sizeof g_dir, "bug-reports/%s", stamp);
     if (MKDIR(g_dir) != 0) { LOG("[bugrec] can't make %s: not recording\n", g_dir); g_dir[0] = 0; return; }
     lock_take(g_dir);
+    // the save as the game mounts it (services/fs.c fs_save_dir: save/ for Z-A, save/<title id>/ for Arceus...) into
+    // save/save_0 - the layout a replay mounts (LARECOMP_SAVE_DIR=<copy of save/>, as replay-record.sh records)
+    extern const char *fs_save_dir(void);
+    char from[700];
+    snprintf(from, sizeof from, "%s/save_0", fs_save_dir());
     snprintf(p, sizeof p, "%s/save", g_dir);
-    copy_tree("save/save_0", p);  // (no save yet: an empty folder - the replay starts a new game, as the player did)
+    MKDIR(p);
+    snprintf(p, sizeof p, "%s/save/save_0", g_dir);
+    copy_tree(from, p);  // (no save yet: an empty folder - the replay starts a new game, as the player did)
     snprintf(p, sizeof p, "%s/larecomp.ini", g_dir);
     copy_file("larecomp.ini", p);
     snprintf(text, sizeof text, "%lld\n", (long long)now);

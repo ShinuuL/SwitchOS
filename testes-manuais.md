@@ -6,7 +6,7 @@ Testes que só dão para fazer jogando ou olhando a janela. Marque com [x] e ano
 
 - [ ] **60 fps (F1 > 60 fps ligado):** segurar o direcional 3 s andando e correndo, a 30 e a 60 fps, do mesmo ponto. A distância tem que ser igual.
 - [ ] **60 fps:** animações, água, céu, hora do dia e câmera na velocidade normal. Anotar qualquer coisa isolada correndo 2x (efeito, objeto do cenário, interface).
-- [ ] **60 fps:** batalha, menus e a volta automática para 30 fps quando cai abaixo de 50.
+- [ ] **60 fps** (gravação de 19/11: caiu para 30 aos 0:58 numa cutscene e não voltou; refazer sem gravar, religando no F1): batalha, menus e a volta automática para 30 fps quando cai abaixo de 50.
 - [ ] Piscar de texturas no chão: onde acontece e se some com o 60 fps desligado (F1).
 - [ ] Atraso para carregar os Pokémon nas cutscenes: em qual cena.
 - [ ] **Gravar a entrada até o piscar e até uma cutscene com atraso** (não reproduziu sem você: em Jubilife, no QG e no título não pisca, e o carregamento de Jubilife não atrasa). No PowerShell, com o hub fechado:
@@ -19,13 +19,15 @@ Testes que só dão para fazer jogando ou olhando a janela. Marque com [x] e ano
 - [ ] História do começo ao fim (nada deve travar).
 - [ ] Fotos do time na tela do hub (depois dos ícones do Arceus).
 
-- [ ] Jogando pelo hub: título da janela "Pokémon Legends: Arceus — SwitchOS" (acentos e travessão certos, também na barra de tarefas).
+- [x] Jogando pelo hub: título da janela "Pokémon Legends: Arceus — SwitchOS" (acentos e travessão certos, também na barra de tarefas). — ok na gravação de 19/11 (log e vídeo); barra de tarefas não conferida.
 
 ## Gravação no hub
 
+- [ ] **Nova Gravar sessão** (exe de 19/11 noite, que grava o save certo): passar pelo chão com capim onde apareceram as listras diagonais (5:49 da gravação de 19/11, câmera baixa no chão perto da Akari) e apertar **F8** logo depois.
+
 - [ ] **Gravar sessão** no Arceus até o chão piscar e até uma cutscene com atraso (F8 em cada vez); mandar a pasta (Configurações > Pasta das gravações).
-- [ ] **Gravar vídeo**: o `video.mp4` mostra o jogo e o jogo não perde fps gravando.
-- [ ] Jogar normal: `logs/play.log` é criado (o jogo não herda mais a saída do hub).
+- [x] **Gravar vídeo**: o `video.mp4` mostra o jogo e o jogo não perde fps gravando. — vídeo 1296x758 30 fps 12:24, jogo inteiro. Perda de fps gravando: não confirmada.
+- [x] Jogar normal: `logs/play.log` é criado (o jogo não herda mais a saída do hub). — criado pelo --play do hub (gravação de 19/11).
 
 ## Z-A no PC
 

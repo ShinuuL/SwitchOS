@@ -1748,8 +1748,9 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
     }
 }
 
-static Service *open_host_fs(const char *sub) {
-    HostFs *fs = calloc(1, sizeof *fs);
+// The game's save folder (its save_0 inside): the rule open_host_fs mounts by - also the bug recorder's copy of the
+// save (runtime/bugrec.c), so a report carries this game's save. g_program_id must be known (main.c reads it first).
+const char *fs_save_dir(void) {
     if (getenv("LARECOMP_SAVE_DIR")) g_save_dir = getenv("LARECOMP_SAVE_DIR");  // test runs use a scratch copy
     else if (rando_seed_dir()) {  // each randomizer seed has its own save slots
         static char seed_save[600];
@@ -1762,6 +1763,12 @@ static Service *open_host_fs(const char *sub) {
         snprintf(game_save, sizeof game_save, "save/%016llx", (unsigned long long)g_program_id);
         g_save_dir = game_save;
     }
+    return g_save_dir;
+}
+
+static Service *open_host_fs(const char *sub) {
+    HostFs *fs = calloc(1, sizeof *fs);
+    fs_save_dir();
     snprintf(fs->root, sizeof fs->root, "%s/%s", g_save_dir, sub);
     char cmd[1200];
     snprintf(cmd, sizeof cmd, "%s", fs->root);
