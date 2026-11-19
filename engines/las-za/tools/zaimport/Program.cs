@@ -83,11 +83,13 @@ static int Run(string[] args)
     string? titleKeys = null;  // (--title-keys: the launcher found it by its contents, whatever its name)
     bool noKeys = false;       // (--no-keys: a .nup-only import; the start screen passes this)
     bool iconOnly = false;     // SwitchOS (--icon-only: só extrai o icon.jpg, para o hub)
+    bool probe = false;        // SwitchOS (--probe: só lista o jogo de cada pacote, sem extrair nada, para o hub)
     while (args.Length > 0)
     {
         if (args[0] == "--title-keys" && args.Length >= 2) (titleKeys, args) = (args[1], args[2..]);
         else if (args[0] == "--no-keys") (noKeys, args) = (true, args[1..]);
         else if (args[0] == "--icon-only") (iconOnly, args) = (true, args[1..]);
+        else if (args[0] == "--probe") (probe, args) = (true, args[1..]);
         else break;
     }
     string keysPath = "", outDir;
@@ -162,6 +164,28 @@ static int Run(string[] args)
             fs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
             ncas.Add((new Nca(ks!, f.Release().AsStorage()), $"{Path.GetFileName(pkg)}/{e.Name}"));
         }
+    }
+
+    // SwitchOS --probe: what each package is, without extracting anything (the hub warns before importing another
+    // game's file). One line per content: "probe<TAB><package><TAB><base title id><TAB>base|update|dlc|other".
+    // The base title id is the game's (the update's +0x800 and a DLC's +0x1000+n masked off).
+    if (probe)
+    {
+        foreach (var (nca, name) in ncas)
+        {
+            string pkgName = name.Contains('/') ? name[..name.LastIndexOf('/')] : name;
+            string kind = nca.Header.ContentType switch
+            {
+                NcaContentType.Program => IsPatch(nca) ? "update" : "base",
+                NcaContentType.PublicData => "dlc",
+                _ => "",
+            };
+            if (kind != "") Console.WriteLine($"probe	{pkgName}	{nca.Header.TitleId & ~0x1FFFUL:x16}	{kind}");
+        }
+        foreach (var r in nups)
+            foreach (var p in r.Packages)
+                Console.WriteLine($"probe	{Path.GetFileName(r.Path)}	{p.TitleId & ~0x1FFFUL:x16}	{(p.Kind switch { 0 => "base", 1 => "update", 2 => "dlc", _ => "other" })}");
+        return 0;
     }
 
     // .nup packages: the base and the highest update, plus every add-on. An update's code and data are the full ones

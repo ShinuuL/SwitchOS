@@ -218,6 +218,9 @@ def main() -> int:
     s = sub.add_parser("sync"); s.add_argument("game", nargs="?")
     s.add_argument("--no-android", action="store_true"); s.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("play"); p.add_argument("game"); p.add_argument("--no-android", action="store_true")
+    b = sub.add_parser("backups", help="lista os backups de save de um jogo"); b.add_argument("game")
+    r = sub.add_parser("restore", help="restaura um backup no save do PC (o save atual vira backup antes)")
+    r.add_argument("game"); r.add_argument("backup", help="nome listado por 'backups', ou 'latest'")
     args = ap.parse_args()
 
     scfg, games = load_config()
@@ -229,6 +232,35 @@ def main() -> int:
                 exe = "exe OK" if g.pc_exe and g.pc_exe.is_file() else "não compilado"
                 line += f"  | PC: {exe}, {pc}" + ("  [!] binários não verificados" if g.untrusted else "")
             print(line)
+        return 0
+
+    if args.cmd in ("backups", "restore"):
+        g = games.get(args.game)
+        if not g:
+            print(f"Jogo desconhecido: {args.game} (veja 'list')")
+            return 1
+        bdir = expand(scfg["cloud_dir"]) / "backups" / g.title_id
+        items = sorted(p for p in bdir.iterdir() if p.is_dir()) if bdir.is_dir() else []
+        if args.cmd == "backups":
+            if not items:
+                print(f"Nenhum backup de {g.name}.")
+            for it in items:
+                n = sum(1 for f in it.rglob("*") if f.is_file())
+                print(f"{it.name}  ({n} arquivo(s), {time.strftime('%d/%m/%Y %H:%M', time.localtime(tree_mtime(it)))})")
+            return 0
+        if not g.pc_save:
+            print(f"{g.name} não tem pc_save em games.toml.")
+            return 1
+        src = items[-1] if args.backup == "latest" and items else bdir / args.backup
+        if not src.is_dir():
+            print(f"Backup não encontrado: {args.backup} (veja 'backups {g.key}')")
+            return 1
+        # o save atual vira backup antes (a restauração pode ser desfeita com outro restore)
+        if tree_hash(g.pc_save):
+            backup(g.pc_save, expand(scfg["cloud_dir"]), g, "pre-restore", int(scfg.get("keep_backups", 10)) + 1)
+        replace_tree(src, g.pc_save)
+        print(f"Restaurado {src.name} em {g.pc_save}. O save anterior está em backups/ como '*-pre-restore'.")
+        print("Feche o jogo antes de restaurar; a próxima 'sync' leva este save para a nuvem e o celular.")
         return 0
 
     sel = [games[args.game]] if getattr(args, "game", None) else list(games.values())

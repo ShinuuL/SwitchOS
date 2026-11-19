@@ -56,8 +56,15 @@ data class ForkVersion(
 
 object UpdateVersion {
 
-    /** The fork's own page on GitHub: the source, the issues and the releases all live there */
-    const val REPO_URL = "https://github.com/zFitness/nx2androidX"
+    /**
+     * SwitchOS: the app's own repository (the fork is locked: Mastersys takes upstream changes only when the team
+     * decides). Its source (GPL-3.0-or-later), its issues and its releases live there, so the update notice never
+     * offers the upstream nx2androidX build in place of this app.
+     */
+    const val REPO_URL = "https://github.com/ShinuuL/SwitchOS"
+
+    /** The game profiles package still comes from upstream's releases (the profiles are upstream's data) */
+    const val PROFILES_REPO_URL = "https://github.com/zFitness/nx2androidX"
 
     /** The release page of the fork: it redirects to the newest release's tag */
     const val RELEASES_LATEST_URL = "$REPO_URL/releases/latest"

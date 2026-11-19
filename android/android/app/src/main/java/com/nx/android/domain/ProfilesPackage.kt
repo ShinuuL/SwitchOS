@@ -16,10 +16,10 @@ object ProfilesPackage {
 
     /** The url of a package as a release carries it */
     fun assetUrl(releaseTag: String, packageName: String): String =
-        "${UpdateVersion.REPO_URL}/releases/download/$releaseTag/$packageName"
+        "${UpdateVersion.PROFILES_REPO_URL}/releases/download/$releaseTag/$packageName"
 
     /** The page that lists what a release carries: a plain web page, so no API's rate limit */
-    fun assetsPage(releaseTag: String): String = "${UpdateVersion.REPO_URL}/releases/expanded_assets/$releaseTag"
+    fun assetsPage(releaseTag: String): String = "${UpdateVersion.PROFILES_REPO_URL}/releases/expanded_assets/$releaseTag"
 
     /** The names of the packages a release carries (the assets page says them), empty when it carries none */
     fun packageNamesIn(html: String): List<String> =
