@@ -48,6 +48,7 @@ const game = () => shelf().find((g) => g.key === current) || shelf()[0];
 // tile: indicador da miniatura ("busy" ponto ciano, "failed" ponto coral); o texto vai no aria-label.
 function status(g) {
   if (!g.supported) return { text: "Em breve no hub", cls: "soon" };
+  if (g.running) return { text: recOn(g.key) ? "Em jogo · gravando" : "Em jogo", cls: "run", tile: "busy" };
   const j = jobs[g.key];
   if (j?.running) return { text: `Importando: ${j.step}`, cls: "run", tile: "busy" };
   const ex = j?.error ? explainError(j.error, g, j.step) : null;
@@ -1116,10 +1117,10 @@ async function play() {
   watchPlay(g.key);
 }
 
-// O runtime sai sem janela quando o código do jogo não serve (mod com .pchtxt mudou: lib.rs play_exit, código 4):
-// isso acontece nos primeiros segundos, então só esses são acompanhados
+// O runtime sai sem janela quando o código do jogo não serve (mod com .pchtxt mudou: lib.rs play_exit, código 4).
+// Acompanha o processo até o fim: o status mostra "Em jogo" enquanto ele roda (refresh no começo e no fim)
 function watchPlay(key) {
-  let n = 0;
+  let first = true;
   const tick = async () => {
     const r = await invoke("play_exit", { key }).catch(() => null);
     if (r?.stale) {
@@ -1127,7 +1128,11 @@ function watchPlay(key) {
       if (current === key) openRebuild();
       return toast("O código do jogo precisa ser recompilado antes de jogar.");
     }
-    if (r?.running && ++n < 30) setTimeout(tick, 1000);
+    if (r?.running) {
+      if (first) { first = false; refresh(); }
+      return setTimeout(tick, 2000);
+    }
+    refresh(); // fechou: volta a "Pronto para jogar"
   };
   setTimeout(tick, 1000);
 }

@@ -7,7 +7,7 @@ Atualizado em 19/11/2026.
 Foco (decidido em 19/11): os dois jogos que temos (Z-A e Arceus) no PC. Android e outros jogos ficam para depois.
 
 1. **Arceus a 60 fps no PC, como o Z-A.** Em andamento. Pista do Android: `main+0x277d838` liga o present interval 1, mas o mundo anda 2x mais rápido; falta ligar o passo do mundo ao tempo real (como o `FRAME_DT` do Z-A em `framepace.c`).
-2. **Arceus no PC:** piscar de texturas e atraso nas cutscenes (estes dois precisam do usuário jogando).
+2. **Arceus no PC:** 60 fps cai para 30 em cutscene e não volta (ver Runtime e jogos). Listras no chão e atraso nas cutscenes em espera.
 3. **Hub 0.0.2:** teste manual das telas novas (primeira vez, importar save, mods, recompilar).
 4. **Depois:** escala de resolução do Arceus no Android; outros jogos no runtime unificado.
 
@@ -35,8 +35,8 @@ Decisão: o hub (Tauri, `hub/`) continua sendo o aplicativo principal. A tela in
 
 ## Runtime e jogos
 
-- [ ] Arceus: piscar de texturas no chão.
-- [ ] Arceus: atraso para carregar os Pokémon nas cutscenes.
+- [ ] (Em espera desde 20/11) Arceus: listras diagonais no chão com capim (5:49 da gravação de 19/11; suspeita: dither de fade ou sombra). Não voltou e não incomoda; reabrir com Gravar sessão + F8.
+- [ ] (Em espera desde 20/11) Arceus: atraso para carregar os Pokémon nas cutscenes. Não apareceu na gravação.
 - [ ] Arceus: verificar a história do começo ao fim jogando (na teoria, nada bloqueia).
 - [x] `tools/gen.py`: rótulo `PLA_BUILDS` corrigido para 1.1.1. GAMELIB_ID novo `965d7a15765fc205`; runtime, `lasgen` e os dois jogos recompilados (backups em `build/exe-anterior/`).
 - [ ] Confirmar no jogo os textos da tradução PT-BR parcial do Z-A.

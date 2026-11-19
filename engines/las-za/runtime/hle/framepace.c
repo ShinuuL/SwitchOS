@@ -702,7 +702,10 @@ static void pla_set_preset(Cpu *c) {
     if (ch == 0) {  // (the first of a frame's four: the frame's step)
         const char *e = ENV("LARECOMP_FPS");
         const PaceRec *pr = pace_replayed();
-        bool on = pr ? pr->on != 0 : e ? atoi(e) >= 60 : fps60_holds();
+        // (with frame_dt the world steps by the wall clock below: under 60 fps the game keeps its speed, so no backing
+        // off to 30 - fps60_holds is for the fixed 1/60 s step's slow motion. A 46 fps cutscene sent a player's whole
+        // session to 30 for good, 19/11. Below 30 fps the 2-vsync cap still slows it, as on the Switch)
+        bool on = pr ? pr->on != 0 : e ? atoi(e) >= 60 : g_settings.frame_dt ? g_settings.fps60 : fps60_holds();
         uint64_t now = plat_now_ns();
         if (!on) {
             steps = 2, acc = 0;

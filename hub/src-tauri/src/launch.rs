@@ -33,6 +33,13 @@ pub(crate) fn clear_stale(key: &str) {
     STALE.lock().unwrap().remove(key);
 }
 /// O último --play deste jogo: Some(None) ainda aberto, Some(Some(código)) já fechou, None nunca abriu
+/// Jogos abertos por este hub agora (do spawn até o fim do processo): o status "Em jogo"
+static RUNNING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+pub(crate) fn is_running(key: &str) -> bool {
+    RUNNING.lock().unwrap().contains(key)
+}
+
 pub(crate) fn last_exit(key: &str) -> Option<Option<i32>> {
     EXITS.lock().unwrap().get(key).copied()
 }
@@ -82,10 +89,12 @@ pub(crate) fn play_with(
         .map_err(|e| format!("não abriu {}: {e}", exe.display()))?;
     let pid = child.id();
     EXITS.lock().unwrap().insert(key.to_string(), None);
+    RUNNING.lock().unwrap().insert(key.to_string());
     let key = key.to_string();
     // espera o processo numa thread à parte: o hub segue livre e o main.js pergunta o fim por play_exit
     std::thread::spawn(move || {
         let code = child.wait().ok().and_then(|s| s.code());
+        RUNNING.lock().unwrap().remove(&key);
         record_exit(&key, code);
         on_exit(code);
     });

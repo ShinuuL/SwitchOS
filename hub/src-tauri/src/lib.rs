@@ -138,6 +138,8 @@ struct GameState {
     /// o código do jogo precisa ser compilado de novo: o runtime mudou desde a compilação (gamelib_stale) ou o último
     /// "Jogar" saiu dizendo que o código não serve (mod com .pchtxt ligado/desligado: launch::is_stale)
     needs_rebuild: bool,
+    /// aberto por este hub agora (launch::is_running): o status vira "Em jogo"
+    running: bool,
 }
 
 /// O código do jogo foi compilado por outro runtime? Compara o `gamelib.id` da pasta do programa
@@ -219,6 +221,7 @@ fn list_games() -> Vec<GameState> {
                     "arceus" => party::load(&sd.join("main"), &Path::new(&cfg.runtime_dir).join("cache").join(firstrun::icons_dir("arceus")), &party::ARCEUS),
                     _ => vec![],
                 },
+                running: launch::is_running(g.key),
                 needs_rebuild: dir.join("lasgame.dll").is_file()
                     && (gamelib_stale(Path::new(&cfg.runtime_dir), &dir) || launch::is_stale(g.key)),
                 icon: fs::read(dir.join("icon.jpg")).ok().map(|b| {

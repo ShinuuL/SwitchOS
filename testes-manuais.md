@@ -16,7 +16,7 @@ Testes que só dão para fazer jogando ou olhando a janela. Marque com [x] e ano
 
 ## Gravação no hub
 
-- [ ] **Nova Gravar sessão** (exe de 19/11 noite, que grava o save certo): passar pelo chão com capim onde apareceram as listras diagonais (5:49 da gravação de 19/11, câmera baixa no chão perto da Akari) e apertar **F8** logo depois.
+- [x] ~~Nova Gravar sessão nas listras~~ — em espera (20/11): não voltou a aparecer e não incomoda; reabrir se voltar (gravar com F8).
 
 - [x] **Gravar sessão** no Arceus até o chão piscar e até uma cutscene com atraso (F8 em cada vez); mandar a pasta (Configurações > Pasta das gravações). — gravado em 19/11, mas o replay daquela versão trazia o save errado: ver "Nova Gravar sessão".
 - [x] **Gravar vídeo**: o `video.mp4` mostra o jogo e o jogo não perde fps gravando. — vídeo 1296x758 30 fps 12:24, jogo inteiro. Perda de fps gravando: não confirmada.

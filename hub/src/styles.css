@@ -378,6 +378,7 @@ h2 { margin: 0 0 12px; font-size: var(--fs-label); font-weight: 750; letter-spac
 @media (prefers-reduced-motion: reduce) { .rec-btn.on .rec-dot { animation: none; } }
 .fact.rec { color: var(--err); }
 .rec-done { display: grid; gap: 6px; margin-top: 10px; }
+.rec-done[hidden], .save-done[hidden] { display: none; } /* (o display: grid ganhava do hidden: pílula verde vazia) */
 .rec-done .rec-path { color: var(--ink); font: 500 var(--fs-mono) "Cascadia Mono", Consolas, monospace; overflow-wrap: anywhere; }
 .rec-done .rec-warn { color: var(--warn); }
 .rec-note { display: grid; gap: 4px; }
