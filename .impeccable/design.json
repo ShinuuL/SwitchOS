@@ -1,0 +1,277 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-18T21:17:54",
+  "title": "Design System: SwitchOS Hub",
+  "extensions": {
+    "colorMeta": {
+      "focus-cyan": {
+        "role": "primary",
+        "displayName": "Ciano de Foco",
+        "canonical": "oklch(86% 0.13 195)",
+        "tonalRamp": [
+          "oklch(15% 0.016 195)",
+          "oklch(25% 0.049 195)",
+          "oklch(35% 0.081 195)",
+          "oklch(48% 0.123 195)",
+          "oklch(60% 0.13 195)",
+          "oklch(72% 0.121 195)",
+          "oklch(84% 0.069 195)",
+          "oklch(95% 0.022 195)"
+        ]
+      },
+      "night": {
+        "role": "neutral",
+        "displayName": "Noite",
+        "canonical": "oklch(17% 0.02 250)",
+        "tonalRamp": [
+          "oklch(15% 0.003 250)",
+          "oklch(25% 0.007 250)",
+          "oklch(35% 0.013 250)",
+          "oklch(48% 0.019 250)",
+          "oklch(60% 0.02 250)",
+          "oklch(72% 0.019 250)",
+          "oklch(84% 0.011 250)",
+          "oklch(95% 0.003 250)"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Tinta",
+        "canonical": "oklch(97% 0.005 250)",
+        "tonalRamp": [
+          "oklch(15% 0.001 250)",
+          "oklch(25% 0.004 250)",
+          "oklch(35% 0.006 250)",
+          "oklch(48% 0.009 250)",
+          "oklch(60% 0.01 250)",
+          "oklch(72% 0.009 250)",
+          "oklch(84% 0.005 250)",
+          "oklch(95% 0.002 250)"
+        ]
+      },
+      "ready-green": {
+        "role": "status",
+        "displayName": "Verde Pronto",
+        "canonical": "oklch(80% 0.15 155)",
+        "tonalRamp": [
+          "oklch(15% 0.019 155)",
+          "oklch(25% 0.056 155)",
+          "oklch(35% 0.094 155)",
+          "oklch(48% 0.142 155)",
+          "oklch(60% 0.15 155)",
+          "oklch(72% 0.14 155)",
+          "oklch(84% 0.08 155)",
+          "oklch(95% 0.025 155)"
+        ]
+      },
+      "amber": {
+        "role": "status",
+        "displayName": "Âmbar",
+        "canonical": "oklch(82% 0.14 75)",
+        "tonalRamp": [
+          "oklch(15% 0.018 75)",
+          "oklch(25% 0.053 75)",
+          "oklch(35% 0.088 75)",
+          "oklch(48% 0.133 75)",
+          "oklch(60% 0.14 75)",
+          "oklch(72% 0.131 75)",
+          "oklch(84% 0.075 75)",
+          "oklch(95% 0.023 75)"
+        ]
+      },
+      "alert-coral": {
+        "role": "status",
+        "displayName": "Coral de Alerta",
+        "canonical": "oklch(72% 0.17 25)",
+        "tonalRamp": [
+          "oklch(15% 0.021 25)",
+          "oklch(25% 0.064 25)",
+          "oklch(35% 0.106 25)",
+          "oklch(48% 0.162 25)",
+          "oklch(60% 0.17 25)",
+          "oklch(72% 0.159 25)",
+          "oklch(84% 0.091 25)",
+          "oklch(95% 0.028 25)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Nome do jogo selecionado."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Abas e títulos de seção, em maiúsculas."
+      },
+      "data": {
+        "displayName": "Data",
+        "purpose": "Title ID e caminhos (16px); log 14px. Escala com --s (TV)."
+      }
+    },
+    "shadows": [
+      {
+        "name": "tile",
+        "value": "0 10px 24px -12px oklch(0% 0 0 / 0.7)",
+        "purpose": "Miniatura de jogo."
+      },
+      {
+        "name": "tile-focus",
+        "value": "0 22px 44px -18px oklch(0% 0 0 / 0.85)",
+        "purpose": "Jogo selecionado."
+      },
+      {
+        "name": "glass",
+        "value": "inset 0 1px 0 oklch(100% 0 0 / 0.16), 0 8px 20px -14px oklch(0% 0 0 / 0.8)",
+        "purpose": "Cards de vidro."
+      },
+      {
+        "name": "sheet",
+        "value": "inset 0 1px 0 oklch(100% 0 0 / 0.16), -20px 0 60px -20px oklch(0% 0 0 / 0.7)",
+        "purpose": "Folha lateral."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-out",
+        "value": "cubic-bezier(0.23, 1, 0.32, 1)",
+        "purpose": "Entradas e respostas ao toque."
+      },
+      {
+        "name": "ease-move",
+        "value": "cubic-bezier(0.32, 0.72, 0, 1)",
+        "purpose": "Fileira, aba e folha que se movem na tela (320–420ms)."
+      },
+      {
+        "name": "press",
+        "value": "120ms scale(0.97)",
+        "purpose": "Clique em botões e miniaturas."
+      },
+      {
+        "name": "ambient",
+        "value": "700ms opacity",
+        "purpose": "Fundo cruzando entre jogos."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact",
+        "value": "1100px"
+      },
+      {
+        "name": "narrow",
+        "value": "760px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Ação principal do grupo.",
+      "html": "<button class=\"ds-btn-primary\">Importar e compilar</button>",
+      "css": ".ds-btn-primary{padding:9px 18px;border:0;border-radius:99px;background:oklch(97% 0.005 250);color:oklch(18% 0.02 250);font:650 15px Figtree,system-ui,sans-serif;transition:background 160ms ease,transform 120ms cubic-bezier(0.23,1,0.32,1)}.ds-btn-primary:hover{background:#fff}.ds-btn-primary:active{transform:scale(0.97)}.ds-btn-primary:focus-visible{outline:3px solid oklch(97% 0.005 250);outline-offset:3px;background:oklch(97% 0.005 250);color:oklch(18% 0.02 250);box-shadow:0 0 0 9px oklch(100% 0 0 / 0.14)}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Ações de apoio.",
+      "html": "<button class=\"ds-btn\">Abrir pasta de mods</button>",
+      "css": ".ds-btn{padding:9px 18px;border:0;border-radius:99px;background:oklch(100% 0 0 / 0.1);color:oklch(97% 0.005 250);font:650 15px Figtree,system-ui,sans-serif;box-shadow:inset 0 1px 0 oklch(100% 0 0 / 0.09);transition:background 160ms ease,transform 120ms cubic-bezier(0.23,1,0.32,1)}.ds-btn:hover{background:oklch(100% 0 0 / 0.16)}.ds-btn:active{transform:scale(0.97)}.ds-btn:focus-visible{outline:3px solid oklch(97% 0.005 250);outline-offset:3px;background:oklch(97% 0.005 250);color:oklch(18% 0.02 250);box-shadow:0 0 0 9px oklch(100% 0 0 / 0.14)}"
+    },
+    {
+      "name": "Controller Action",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Ação com o glifo do botão do controle.",
+      "html": "<button class=\"ds-act\"><kbd class=\"ds-kbd\">A</kbd>Jogar</button>",
+      "css": ".ds-act{display:inline-flex;align-items:center;gap:8px;padding:4px 10px 4px 4px;border:0;border-radius:99px;background:transparent;color:oklch(97% 0.005 250);font:600 17px Figtree,system-ui,sans-serif}.ds-act:hover{background:oklch(100% 0 0 / 0.1)}.ds-act:focus-visible{outline:3px solid oklch(97% 0.005 250);outline-offset:3px;background:oklch(97% 0.005 250);color:oklch(18% 0.02 250);box-shadow:0 0 0 9px oklch(100% 0 0 / 0.14)}.ds-kbd{display:inline-grid;place-items:center;min-width:24px;height:24px;border-radius:99px;background:oklch(97% 0.005 250);color:oklch(18% 0.02 250);font:750 12px Figtree,sans-serif}[data-input=kbd] .ds-kbd{border-radius:7px;padding:0 8px;background:oklch(100% 0 0 / 0.14);color:oklch(97% 0.005 250);box-shadow:inset 0 0 0 1px oklch(100% 0 0 / 0.22),inset 0 -2px 0 oklch(0% 0 0 / 0.35)}"
+    },
+    {
+      "name": "Tabs",
+      "kind": "nav",
+      "refersTo": "tab-selected",
+      "description": "Trilho de abas com pílula selecionada.",
+      "html": "<nav class=\"ds-tabs\"><button class=\"on\">Versão e DLC</button><button>Mods</button><button>Save</button></nav>",
+      "css": ".ds-tabs{display:inline-flex;gap:4px;padding:4px;border-radius:99px;background:oklch(100% 0 0 / 0.06)}.ds-tabs button{padding:8px 18px;border:0;border-radius:99px;background:transparent;color:oklch(84% 0.015 250);font:750 17px Figtree,sans-serif;letter-spacing:.06em;text-transform:uppercase;transition:color 200ms ease}.ds-tabs button:hover{color:oklch(97% 0.005 250)}.ds-tabs button.on{background:oklch(97% 0.005 250);color:oklch(18% 0.02 250)}.ds-tabs button:focus-visible{outline:3px solid oklch(97% 0.005 250);outline-offset:2px;background:oklch(100% 0 0 / 0.2)}.ds-tabs button.on:focus-visible{background:oklch(97% 0.005 250)}"
+    },
+    {
+      "name": "Game Tile",
+      "kind": "custom",
+      "refersTo": "game-tile-selected",
+      "description": "Miniatura de jogo selecionada, com contorno de foco.",
+      "html": "<button class=\"ds-tile\"><span>Brilliant Diamond</span></button>",
+      "css": ".ds-tile{width:200px;height:200px;border:0;border-radius:14px;padding:18px;text-align:left;align-content:start;display:grid;color:#fff;font:750 24px/1.12 Figtree,sans-serif;background:linear-gradient(135deg,#5b8def,color-mix(in oklch,#5b8def 35%,black));box-shadow:0 22px 44px -18px oklch(0% 0 0 / 0.85),inset 0 0 0 4px oklch(86% 0.13 195);transition:transform 120ms cubic-bezier(0.23,1,0.32,1)}.ds-tile:active{transform:scale(0.97)}"
+    },
+    {
+      "name": "Party Card",
+      "kind": "card",
+      "refersTo": "party-card",
+      "description": "Pokémon do time do save.",
+      "html": "<div class=\"ds-mon\"><div class=\"ds-mon-art\"></div><div><strong>Charizard</strong><small>Nv. 55</small></div></div>",
+      "css": ".ds-mon{display:flex;align-items:center;gap:10px;width:180px;padding:8px 12px 8px 8px;border-radius:16px;background:oklch(22% 0.02 250 / 0.55);backdrop-filter:blur(18px) saturate(160%);box-shadow:inset 0 1px 0 oklch(100% 0 0 / 0.16),0 8px 20px -14px oklch(0% 0 0 / 0.8);color:oklch(97% 0.005 250);font:500 18px Figtree,sans-serif}.ds-mon-art{width:48px;height:48px;border-radius:12px;background:oklch(82% 0.14 75 / 0.16)}.ds-mon strong{display:block;font-weight:650}.ds-mon small{color:oklch(84% 0.015 250);font-size:18px}"
+    },
+    {
+      "name": "Path Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Campo de caminho nas configurações.",
+      "html": "<input class=\"ds-input\" value=\"D:\\Games\\SwitchOS\">",
+      "css": ".ds-input{width:320px;padding:10px 14px;border:0;border-radius:12px;background:oklch(8% 0.01 250 / 0.6);box-shadow:inset 0 0 0 1px oklch(100% 0 0 / 0.09);color:oklch(97% 0.005 250);font:500 13px \"Cascadia Mono\",Consolas,monospace;caret-color:oklch(86% 0.13 195)}.ds-input:focus{outline:none;box-shadow:inset 0 0 0 2px oklch(86% 0.13 195)}"
+    },
+    {
+      "name": "Status Pill",
+      "kind": "chip",
+      "refersTo": "pill-ok",
+      "description": "Versão lida, DLC instalada.",
+      "html": "<span class=\"ds-pill\">Mega Dimension instalada</span>",
+      "css": ".ds-pill{padding:3px 11px;border-radius:99px;background:oklch(80% 0.15 155 / 0.16);color:oklch(80% 0.15 155);font:650 13px Figtree,sans-serif}"
+    }
+  ],
+  "narrative": {
+    "northStar": "O Console Pessoal",
+    "overview": "O hub é um console feito sob medida para uma pessoa. A forma é familiar: prateleira de jogos, dicas de botão no rodapé, navegação por controle. Mas não carrega a marca de ninguém. Ele se comporta como o menu inicial de um console, não como um app de desktop: o jogo selecionado manda na tela, a arte dele tinge o fundo, e a interface fica num segundo plano macio e escuro.\n\nA densidade é baixa no topo e cresce para baixo. Primeiro vem o jogo e a ação de jogar, depois o time do save, depois os detalhes em abas (versão e DLC, mods, save, importação). Tudo precisa funcionar a três distâncias: monitor perto, TV longe e controle na mão.\n\nRejeitados: tema claro, cara de painel administrativo (sidebar com lista, cards iguais em grade, tabelas) e as cores e a identidade da Nintendo.",
+    "keyCharacteristics": [
+      "Sempre escuro: o fundo é a arte do jogo desfocada sobre um azul-noite.",
+      "Um jogo em foco por vez, maior, com contorno ciano que respira.",
+      "Pílulas arredondadas e vidro fosco onde a interface flutua sobre a arte.",
+      "Cada ação mostra o botão do controle que a dispara."
+    ],
+    "rules": [
+      {
+        "name": "The Art Leads Rule",
+        "body": "A cor dominante da tela é sempre a da arte do jogo selecionado, nunca da interface. A interface só acrescenta o ciano de foco e as cores de status.",
+        "section": "colors"
+      },
+      {
+        "name": "The No Nintendo Red Rule",
+        "body": "Nada de vermelho Switch nem de qualquer cor ou forma que imite a identidade da Nintendo. O vermelho só aparece se vier da arte do próprio dump.",
+        "section": "colors"
+      },
+      {
+        "name": "The Real Mono Rule",
+        "body": "Monoespaçada só para dado técnico de verdade (title ID, caminho, log). Nunca como enfeite de \"tecnológico\".",
+        "section": "typography"
+      },
+      {
+        "name": "The Materialize Rule",
+        "body": "Superfícies de vidro entram com desfoque, deslocamento e opacidade juntos, como um material chegando, e saem pelo mesmo caminho. Uma tarefa que interrompe (configurações) escurece e desfoca o fundo. Um painel paralelo não escurece nada.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** deixar a arte do jogo selecionado tingir o fundo, desfocada (blur 64px) sob gradientes escuros.",
+      "**Do** mostrar, ao lado de cada ação importante, o botão do controle que a dispara.",
+      "**Do** usar a curva de saída forte (`cubic-bezier(0.23, 1, 0.32, 1)`) para entradas e a de gaveta (`cubic-bezier(0.32, 0.72, 0, 1)`) para o que se move na tela, sempre abaixo de 450ms.",
+      "**Do** trocar movimento por esmaecimento simples quando o sistema pede menos movimento, e vidro por superfície sólida quando pede menos transparência."
+    ],
+    "donts": [
+      "**Don't** criar tema claro. O hub é só escuro.",
+      "**Don't** voltar para cara de painel administrativo: sidebar com lista de jogos, grade de cards iguais ou tabelas.",
+      "**Don't** usar o vermelho Switch, logos ou qualquer elemento que imite a identidade da Nintendo.",
+      "**Don't** usar glifos Unicode ou emoji no lugar de ícones. Ícones são SVG de traço de 1.8px."
+    ]
+  }
+}

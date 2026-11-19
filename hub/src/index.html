@@ -8,106 +8,140 @@
     <script type="module" src="main.js" defer></script>
   </head>
   <body>
-    <aside class="sidebar">
-      <div class="brand">
-        <span class="brand-mark">S</span>
-        <div>
-          <strong>SwitchOS</strong>
-          <small>Hub 0.0.1</small>
-        </div>
+    <!-- fundo: arte do jogo selecionado, desfocada (duas camadas para o crossfade) -->
+    <div class="ambient" aria-hidden="true"><div class="amb" data-amb="0"></div><div class="amb" data-amb="1"></div></div>
+
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><strong>SwitchOS</strong></div>
+      <div class="sys">
+        <time id="clock"></time>
+        <button class="icon-btn" id="open-settings" type="button" aria-label="Configurações" title="Configurações">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.4M12 18.8v2.4M21.2 12h-2.4M5.2 12H2.8M18.5 5.5l-1.7 1.7M7.2 16.8l-1.7 1.7M18.5 18.5l-1.7-1.7M7.2 7.2 5.5 5.5"/><circle cx="12" cy="12" r="6.6"/></svg>
+        </button>
       </div>
-      <nav class="library" id="library" aria-label="Biblioteca"></nav>
-      <button class="nav-settings" id="open-settings" type="button">Configurações</button>
-    </aside>
+    </header>
 
-    <main class="content" id="content" aria-live="polite"></main>
-
-    <template id="tpl-game">
-      <section class="game">
-        <header class="hero">
-          <div class="hero-art" data-art></div>
-          <div class="hero-info">
-            <p class="eyebrow" data-tid></p>
-            <h1 data-name></h1>
-            <div class="chips" data-chips></div>
-            <div class="actions">
-              <button class="btn primary" data-play type="button">Jogar</button>
-              <button class="btn" data-folder type="button">Abrir pasta do jogo</button>
-            </div>
-            <p class="hint" data-hint></p>
-          </div>
-        </header>
-
-        <section class="team" data-team hidden>
-          <h2>Seu time</h2>
-          <div class="team-cards" data-team-cards></div>
+    <main class="stage">
+      <!-- tela inicial: prateleira, time e próximos jogos -->
+      <div class="view view-home on" id="view-home">
+        <!-- primeiro uso: aparece no lugar da prateleira enquanto check_paths acusar algum caminho; some sozinho quando os 3 ficam ok -->
+        <section class="setup" id="setup" aria-labelledby="setup-title" hidden>
+          <h1 id="setup-title">Vamos preparar o hub</h1>
+          <p class="setup-lede">Três itens nas Configurações e você já pode importar o seu primeiro jogo.</p>
+          <ol class="steps" id="setup-steps"></ol>
+          <button class="btn primary setup-go" data-setup-go type="button"><kbd class="b-a" data-k="a"></kbd>Configurar</button>
         </section>
 
-        <div class="panels">
-          <article class="panel">
-            <h2>Versão e DLC</h2>
-            <dl class="facts">
-              <div><dt>Versão do jogo</dt><dd data-version></dd></div>
-              <div><dt>DLC</dt><dd data-dlc></dd></div>
-            </dl>
-          </article>
-
-          <article class="panel">
-            <h2>Importar jogo</h2>
-            <p class="muted">Escolha o NSP/XCI do jogo base e da atualização. O hub extrai com o seu <code>prod.keys</code> e compila o código do jogo neste PC.</p>
-            <ul class="files" data-files></ul>
-            <div class="row">
-              <button class="btn" data-pick type="button">Escolher arquivos…</button>
-              <button class="btn primary" data-import type="button" disabled>Importar e compilar</button>
-            </div>
-            <div class="job" data-job hidden>
-              <div class="job-step" data-step></div>
-              <div class="bar"><span data-bar></span></div>
-              <pre class="job-log" data-log></pre>
-            </div>
-          </article>
-
-          <article class="panel">
-            <h2>Mods</h2>
-            <p class="muted">Pastas em <code>mods/</code> com o title id deste jogo (formato do Atmosphère: <code>&lt;title id&gt;/romfs</code>).</p>
-            <ul class="mods" data-mods></ul>
-            <button class="btn" data-mods-folder type="button">Abrir pasta de mods</button>
-          </article>
-
-          <article class="panel">
-            <h2>Save</h2>
-            <p data-save></p>
-            <button class="btn" data-save-folder type="button">Abrir pasta do save</button>
-          </article>
-        </div>
-      </section>
-    </template>
-
-    <template id="tpl-settings">
-      <section class="settings">
-        <h1>Configurações</h1>
-        <form id="settings-form">
-          <label>
-            <span>Pasta do runtime</span>
-            <small>Onde está o <code>lasrecomp.exe</code>. Também guarda saves, mods e logs.</small>
-            <div class="row"><input name="runtime_dir" required /><button class="btn" type="button" data-browse="runtime_dir">…</button></div>
-          </label>
-          <label>
-            <span>Pasta dos jogos</span>
-            <small>Cada jogo importado vai para uma subpasta aqui (fora do repositório).</small>
-            <div class="row"><input name="games_dir" required /><button class="btn" type="button" data-browse="games_dir">…</button></div>
-          </label>
-          <label>
-            <span>prod.keys</span>
-            <small>Chaves extraídas do seu Switch (Lockpick_RCM). O <code>title.keys</code> ao lado é usado se existir.</small>
-            <div class="row"><input name="keys_path" required /><button class="btn" type="button" data-browse-file="keys_path">…</button></div>
-          </label>
-          <div class="row end">
-            <span class="saved" id="saved" hidden>Salvo</span>
-            <button class="btn primary" type="submit">Salvar</button>
+        <section class="shelf" aria-label="Biblioteca">
+          <div class="info" id="info" aria-live="polite">
+            <h1 id="g-name"></h1>
+            <div class="meta" id="g-meta"></div>
           </div>
-        </form>
-      </section>
-    </template>
+          <div class="row" id="row" role="listbox" aria-label="Jogos"></div>
+        </section>
+
+        <!-- tudo configurado, nenhum jogo importado ainda: orienta o primeiro A -->
+        <section class="first-game" id="first-game" hidden>
+          <h2>Importe seu primeiro jogo</h2>
+          <p>Escolha o jogo na fileira e aperte <kbd class="b-a" data-k="a"></kbd> Importar jogo. Você escolhe o NSP ou XCI do jogo base; o hub extrai com o seu <code>prod.keys</code> e compila neste PC.</p>
+        </section>
+
+        <section class="team" id="team" hidden>
+          <h2>Seu time</h2>
+          <div class="mons" id="mons"></div>
+        </section>
+
+        <!-- nenhum jogo suportado / list_games falhou: nunca tela em branco -->
+        <section class="empty-state" id="empty" hidden>
+          <h1>Nenhum jogo na biblioteca</h1>
+          <p>O hub não achou nenhum jogo que ele já roda. Confira nas Configurações a pasta dos jogos e a pasta do programa.</p>
+          <button class="btn primary" data-settings type="button">Abrir Configurações</button>
+        </section>
+        <section class="empty-state" id="load-error" role="alert" hidden>
+          <h1>A biblioteca não carregou</h1>
+          <p>O hub não conseguiu ler a lista de jogos. Tente de novo; se continuar, confira os caminhos nas Configurações.</p>
+          <p class="muted" data-detail></p>
+          <div class="empty-actions">
+            <button class="btn primary" data-reload type="button">Tentar de novo</button>
+            <button class="btn" data-settings type="button">Abrir Configurações</button>
+          </div>
+        </section>
+
+        <!-- informativo, sem foco: não há o que fazer com esses jogos no hub ainda -->
+        <p class="upcoming" id="upcoming" hidden><strong>Próximos jogos</strong> <span id="up-names"></span><span class="muted"> ainda rodam fora do hub e chegam nas próximas versões.</span></p>
+      </div>
+
+      <!-- página do jogo: abre com X / "Opções do jogo" (ou A num jogo não compilado); B / Esc volta -->
+      <div class="view view-game" id="view-game" aria-label="Página do jogo" hidden>
+        <section class="page-head">
+          <div class="page-art" id="p-art" aria-hidden="true"></div>
+          <div class="page-title">
+            <button class="act back" id="p-back" type="button"><kbd class="b-b" data-k="b"></kbd>Voltar</button>
+            <h1 id="p-name"></h1>
+            <div class="meta" id="p-meta"></div>
+            <p class="tip" id="p-tip" hidden>No jogo, F1 abre as configurações gráficas e de controles.</p>
+          </div>
+        </section>
+
+        <div class="job" id="job" hidden>
+          <div class="job-step" data-step></div>
+          <p class="job-what" data-what hidden></p>
+          <div class="bar"><span data-bar></span></div>
+          <div class="job-actions" data-job-actions hidden></div>
+          <pre class="job-log" data-log></pre>
+        </div>
+
+        <section class="details">
+          <nav class="tabs" role="tablist" id="tabs">
+            <button role="tab" data-tab="about" type="button">Versão e DLC</button>
+            <button role="tab" data-tab="mods" type="button">Mods</button>
+            <button role="tab" data-tab="save" type="button">Save</button>
+            <button role="tab" data-tab="import" type="button">Importação</button>
+            <span class="tab-ink" aria-hidden="true"></span>
+          </nav>
+          <div class="pane" id="pane" role="tabpanel"></div>
+        </section>
+      </div>
+    </main>
+
+    <footer class="hints">
+      <span class="status" id="g-status"></span>
+      <div class="keys" id="keys"></div>
+    </footer>
+
+    <div class="scrim" id="scrim" hidden></div>
+    <aside class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" hidden>
+      <header><h2 id="sheet-title">Configurações</h2><button class="icon-btn" id="close-settings" type="button" aria-label="Fechar">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button></header>
+      <form id="settings-form">
+        <label>
+          <span>Pasta do programa</span>
+          <small>A pasta do programa que roda os jogos (a que tem o <code>lasrecomp.exe</code>). Também guarda saves, mods e logs.</small>
+          <div class="field"><input name="runtime_dir" required aria-describedby="ck-runtime_dir" /><button class="btn" type="button" data-browse="runtime_dir">Procurar</button></div>
+          <small class="check" id="ck-runtime_dir" data-check="runtime_dir" hidden></small>
+        </label>
+        <label>
+          <span>Pasta dos jogos</span>
+          <small>Cada jogo importado vai para uma subpasta aqui.</small>
+          <div class="field"><input name="games_dir" required aria-describedby="ck-games_dir" /><button class="btn" type="button" data-browse="games_dir">Procurar</button></div>
+          <small class="check" id="ck-games_dir" data-check="games_dir" hidden></small>
+        </label>
+        <label>
+          <span>prod.keys</span>
+          <small>Chaves extraídas do seu Switch (Lockpick_RCM). O <code>title.keys</code> ao lado é usado se existir.</small>
+          <div class="field"><input name="keys_path" required aria-describedby="ck-keys_path" /><button class="btn" type="button" data-browse-file="keys_path">Procurar</button></div>
+          <small class="check" id="ck-keys_path" data-check="keys_path" hidden></small>
+        </label>
+        <div class="save-warn" id="save-warn" role="alert" hidden>
+          <span>Algum caminho acima tem problema. O hub pode não conseguir importar ou abrir os jogos.</span>
+          <button class="btn" type="submit" data-force>Salvar mesmo assim</button>
+        </div>
+        <div class="form-end">
+          <span class="saved" id="saved" role="status" aria-live="polite"></span>
+          <button class="btn primary" type="submit">Salvar</button>
+        </div>
+      </form>
+      <p class="sheet-ver">SwitchOS Hub 0.0.2</p>
+    </aside>
   </body>
 </html>
