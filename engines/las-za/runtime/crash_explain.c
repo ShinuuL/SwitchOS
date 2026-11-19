@@ -106,6 +106,9 @@ static bool game_files_damaged(char *version, size_t n) {
     return true;
 }
 
+// SwitchOS: the platform layer counts the guest-memory commits the OS refused for lack of memory (windows.c)
+int rt_commit_failed;
+
 void rt_crash_explain(char *out, size_t n, const char *log_path) {
     static const char *const report = "Please report it as a GitHub issue and attach the log file below. "
                                       "Your progress up to your last save or autosave is safe.";
@@ -142,6 +145,12 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
                                                                          // unwind; runtime/hle/warp.c rt_cxa_throw)
         snprintf(head, sizeof head, "The game ran into an error it couldn't recover from");
         snprintf(what, sizeof what, "This is a bug in %s, not a problem with your game files or PC. %s", app, report);
+    } else if (rt_commit_failed) {  // SwitchOS: before every other guess - the crash is the refused page
+        snprintf(head, sizeof head, "Your PC ran out of memory");
+        snprintf(what, sizeof what, "Windows refused the memory the game asked for (RAM and page file are full), and "
+                 "the game stopped. Close other programs (browsers, other games, development tools) and start %s again; "
+                 "if it keeps happening, let Windows manage the page file size or make it larger. Nothing is lost, up to "
+                 "your last save or autosave.", app);
     } else if (rt_gpu_bad_code < 0) {
         snprintf(head, sizeof head, "The graphics driver's shader compiler crashed");
         snprintf(what, sizeof what, "It crashed on one of the game's shaders. %s now knows which one and will skip it, so one "

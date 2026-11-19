@@ -250,12 +250,19 @@ bool plat_reset_guest(uint64_t lo, uint64_t hi) {
     return VirtualFree((void *)(uintptr_t)lo, hi - lo, MEM_DECOMMIT) != 0;
 }
 
+extern int rt_commit_failed;  // runtime/crash_explain.c
 void plat_commit(uint64_t addr, uint64_t size) {
     if (!size) return;
     uint64_t a = addr & ~0xFFFull, e = (addr + size + 0xFFF) & ~0xFFFull;
-    if (!VirtualAlloc((void *)(uintptr_t)a, e - a, MEM_COMMIT, PAGE_READWRITE))
+    if (!VirtualAlloc((void *)(uintptr_t)a, e - a, MEM_COMMIT, PAGE_READWRITE)) {
+        DWORD err = GetLastError();
         fprintf(stderr, "[plat] commit %llx+%llx failed (%lu)\n", (unsigned long long)addr,
-                (unsigned long long)size, GetLastError());
+                (unsigned long long)size, err);
+        // SwitchOS: ERROR_COMMITMENT_LIMIT / ERROR_NOT_ENOUGH_MEMORY / ERROR_NO_SYSTEM_RESOURCES - the PC is out of
+        // memory (RAM + page file), and the game crashes a moment later reading the page it was refused (Z-A,
+        // 2026-11-18: commit 745ac00000+400000 failed (1455), then an access violation inside that range)
+        if (err == 1455 || err == 8 || err == 1450) rt_commit_failed++;
+    }
 }
 
 // (gmem_fault_explain, #39 #72) committed? resident? A committed page nothing ever touched has no physical page yet

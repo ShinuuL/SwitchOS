@@ -31,6 +31,9 @@ Trazer para o hub o que hoje só a tela do ZA Recomp faz:
 - [ ] Arceus: verificar a história do começo ao fim jogando (na teoria, nada bloqueia).
 - [ ] `tools/gen.py`: o rótulo `PLA_BUILDS` diz 1.0.1, mas a build `aee8f150` é a 1.1.1. O `gen.py` entra no `GAMELIB_ID`: corrigir junto com a próxima mudança que já obrigue a recompilar.
 - [ ] Confirmar no jogo os textos da tradução PT-BR parcial do Z-A.
+- [x] Crash do Z-A com DLC + tradução: não era o `data.trpfd` do mod (o runtime já ignora a cópia do mod, `fs.c` `layer_file`). Um crash foi falta de memória no PC (commit negado, erro 1455): o diálogo agora explica "Your PC ran out of memory" (`rt_commit_failed`).
+- [ ] Crash raro do Z-A: ponteiro nulo (`0xd0`) uma vez, ao abrir com DLC + tradução. Não se repetiu em 8 rodadas. Log em `ZA Recomp/logs/crash-raros/`.
+- [x] `boot_test.sh` encerra o jogo pelo PID do Windows (`taskkill`). O `kill` do Git Bash deixava um teste travado prendendo 5,6 GB.
 - [ ] Integrar ao runtime unificado os outros jogos: Sword/Shield, BDSP, TotK.
 
 ## Android
