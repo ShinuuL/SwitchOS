@@ -1,4 +1,4 @@
-//! O time do save do Pokémon Legends: Z-A - o mesmo leitor da tela inicial do ZA Recomp (engines/las-za,
+//! O time do save dos Pokémon Legends (Z-A e Arceus). Z-A - o mesmo leitor da tela inicial do ZA Recomp (engines/las-za,
 //! runtime/ui/launcher.mm: party_block / party_decrypt / party_model), portado para o hub. Só lê o save.
 //!
 //! save/save_0/main: XOR com um pad de 0x7F bytes (os últimos 32 bytes são um SHA-256), depois blocos chave u32 + tipo
@@ -72,7 +72,7 @@ fn rd32(p: &[u8]) -> u32 {
     u32::from_le_bytes([p[0], p[1], p[2], p[3]])
 }
 
-fn party_block(mut p: Vec<u8>) -> Option<Vec<u8>> {
+fn party_block(mut p: Vec<u8>, want: u32) -> Option<Vec<u8>> {
     const WIDTH: [u64; 18] = [0, 0, 0, 1, 0, 0, 0, 0, 1, 2, 4, 8, 1, 2, 4, 8, 4, 8];
     if p.len() < 64 {
         return None;
@@ -117,7 +117,7 @@ fn party_block(mut p: Vec<u8>) -> Option<Vec<u8>> {
             return None;
         }
         let size = size as usize;
-        if key == 0x3AA1A9AD {
+        if key == want {
             return Some((0..size).map(|i| p[o + i] ^ x.next()).collect());
         }
         o += size;
@@ -125,7 +125,8 @@ fn party_block(mut p: Vec<u8>) -> Option<Vec<u8>> {
     None
 }
 
-fn decrypt(d: &mut [u8; 0x158]) {
+/// `enc_end`: fim da parte cifrada em blocos (depois vêm os stats do time); `blk`: tamanho de cada um dos 4 blocos
+fn decrypt(d: &mut [u8], enc_end: usize, blk: usize) {
     const POS: [u8; 96] = [
         0, 1, 2, 3, 0, 1, 3, 2, 0, 2, 1, 3, 0, 3, 1, 2, 0, 2, 3, 1, 0, 3, 2, 1, 1, 0, 2, 3, 1, 0, 3, 2, 2, 0, 1, 3, 3, 0, 1, 2,
         2, 0, 3, 1, 3, 0, 2, 1, 1, 2, 0, 3, 1, 3, 0, 2, 2, 1, 0, 3, 3, 1, 0, 2, 2, 3, 0, 1, 3, 2, 0, 1, 1, 2, 3, 0, 1, 3, 2, 0,
@@ -134,8 +135,8 @@ fn decrypt(d: &mut [u8; 0x158]) {
     let ec = rd32(&d[..]);
     let mut seed = ec;
     let mut i = 8;
-    while i < 0x158 {
-        if i == 0x148 {
+    while i + 1 < d.len() {
+        if i == enc_end {
             seed = ec;
         }
         seed = seed.wrapping_mul(0x41C64E6D).wrapping_add(0x6073);
@@ -143,12 +144,11 @@ fn decrypt(d: &mut [u8; 0x158]) {
         d[i..i + 2].copy_from_slice(&v.to_le_bytes());
         i += 2;
     }
-    let mut src = [0u8; 0x140];
-    src.copy_from_slice(&d[8..0x148]);
+    let src = d[8..8 + 4 * blk].to_vec();
     let sv = ((ec >> 13) & 31) as usize % 24;
     for b in 0..4 {
-        let from = 0x50 * POS[sv * 4 + b] as usize;
-        d[8 + 0x50 * b..8 + 0x50 * (b + 1)].copy_from_slice(&src[from..from + 0x50]);
+        let from = blk * POS[sv * 4 + b] as usize;
+        d[8 + blk * b..8 + blk * (b + 1)].copy_from_slice(&src[from..from + blk]);
     }
 }
 
@@ -192,42 +192,75 @@ fn icon(icons: &Path, m: &PartyMon) -> Option<String> {
     None
 }
 
+/// formato do save de cada jogo
+pub struct Format {
+    block: u32,    // chave do bloco do time
+    slot: usize,   // tamanho de cada slot no bloco
+    len: usize,    // bytes do Pokémon (parte cifrada + stats do time)
+    enc_end: usize, // fim dos 4 blocos embaralhados = offset do nível
+    blk: usize,
+    nick: usize,
+    iv32: usize,   // bit 30 = ovo
+}
+
+/// Pokémon Legends: Z-A (PA9): bloco 0x3AA1A9AD, 6 slots de 0x1E0, blocos de 0x50
+pub const ZA: Format = Format { block: 0x3AA1A9AD, slot: 0x1E0, len: 0x158, enc_end: 0x148, blk: 0x50, nick: 0x58, iv32: 0x8C };
+/// Pokémon Legends: Arceus (PA8): bloco 0x2985FE5D, 6 slots de 0x178, blocos de 0x58 (tools/switchos/pla_party.py)
+pub const ARCEUS: Format = Format { block: 0x2985FE5D, slot: 0x178, len: 0x178, enc_end: 0x168, blk: 0x58, nick: 0x60, iv32: 0x94 };
+
 /// o time do save (vazio se não houver save ou se o formato não for reconhecido)
-pub fn load(save_main: &Path, icons: &Path) -> Vec<PartyMon> {
+pub fn load(save_main: &Path, icons: &Path, f: &Format) -> Vec<PartyMon> {
     let Ok(p) = std::fs::read(save_main) else { return vec![] };
     if p.len() >= 64 << 20 {
         return vec![];
     }
-    let Some(blk) = party_block(p) else { return vec![] };
+    let Some(blk) = party_block(p, f.block) else { return vec![] };
     let mut out = vec![];
     let mut i = 0;
-    while i + 0x158 <= blk.len() && i < 6 * 0x1E0 {
-        let mut d = [0u8; 0x158];
-        d.copy_from_slice(&blk[i..i + 0x158]);
-        i += 0x1E0;
+    while i + f.len <= blk.len() && i < 6 * f.slot {
+        let mut d = blk[i..i + f.len].to_vec();
+        i += f.slot;
         if rd32(&d) == 0 {
             continue;
         }
-        decrypt(&mut d);
+        decrypt(&mut d, f.enc_end, f.blk);
         let species = u16::from_le_bytes([d[8], d[9]]) as u32;
-        let level = d[0x148] as u32;
+        let level = d[f.enc_end] as u32;
         if species == 0 || species > 1025 || level > 100 {
             continue;
         }
         let pid = rd32(&d[0x1C..]);
         let id = rd32(&d[0x0C..]);
-        let name: Vec<u16> = (0..13).map(|k| u16::from_le_bytes([d[0x58 + 2 * k], d[0x59 + 2 * k]])).take_while(|&c| c != 0).collect();
+        let name: Vec<u16> =
+            (0..13).map(|k| u16::from_le_bytes([d[f.nick + 2 * k], d[f.nick + 1 + 2 * k]])).take_while(|&c| c != 0).collect();
         let mut m = PartyMon {
             name: String::from_utf16_lossy(&name),
             species,
             form: d[0x24] as u32,
             level,
             shiny: ((pid >> 16) ^ (pid & 0xFFFF) ^ (id >> 16) ^ (id & 0xFFFF)) < 16,
-            egg: (rd32(&d[0x8C..]) >> 30) & 1 == 1,
+            egg: (rd32(&d[f.iv32..]) >> 30) & 1 == 1,
             icon: None,
         };
         m.icon = icon(icons, &m);
         out.push(m);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    /// PARTY_TEST_PLA / PARTY_TEST_ZA: cópias de saves (nunca versionadas); sem elas o teste não faz nada
+    #[test]
+    fn saves() {
+        for (var, f) in [("PARTY_TEST_PLA", &super::ARCEUS), ("PARTY_TEST_ZA", &super::ZA)] {
+            if let Ok(p) = std::env::var(var) {
+                let t = super::load(std::path::Path::new(&p), std::path::Path::new("."), f);
+                for m in &t {
+                    println!("{var}: {} sp {} form {} lv {} shiny {} egg {}", m.name, m.species, m.form, m.level, m.shiny, m.egg);
+                }
+                assert!(!t.is_empty(), "{var}: time vazio");
+            }
+        }
+    }
 }

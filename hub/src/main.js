@@ -22,6 +22,7 @@ let games = [];
 let current = store.get("hub.current", "arceus");
 let tab = store.get("hub.tab", "about");
 const picked = {}; // key -> [arquivos escolhidos para importar]
+const probed = {}; // key -> { items } | { loading } | { error }: o zaimport --probe sobre os arquivos escolhidos
 let pollTimer = null;
 let ambLayer = 0;
 let ambKey = null;
@@ -380,6 +381,7 @@ function renderKeys(g) {
   else if (settingsOpen()) html = k("a", "Selecionar") + k("b", "Voltar");
   else if (view === "game" && confirmCancel) html = k("a", "Selecionar") + k("b", "Continuar importando");
   else if (view === "game" && $("[data-reimport-no]")) html = k("a", "Selecionar") + k("b", "Manter como está");
+  else if (view === "game" && $("[data-other-no]")) html = k("a", "Selecionar") + k("b", "Voltar");
   else if (view === "game" && $("[data-restore-no]")) html = k("a", "Selecionar") + k("b", "Manter como está");
   else if (view === "game" && restoring) html = `<span>Restaurando o save…</span>`;
   // inicial: Jogar (A) e Opções (X) já aparecem ao lado do nome; o rodapé não repete
@@ -666,21 +668,78 @@ const paneWire = {
     const btn = $("[data-import]", p);
     const show = () => {
       const list = picked[g.key] || [];
-      files.innerHTML = list.map((f) => `<li><strong>${esc(f.split(/[\\/]/).pop())}</strong></li>`).join("");
-      btn.disabled = !list.length || !g.supported;
+      const pr = probed[g.key];
+      files.innerHTML = list.map((f) => {
+        const name = baseName(f);
+        return `<li><strong>${esc(name)}</strong>${probeTag(pr, name)}</li>`;
+      }).join("");
+      btn.disabled = !list.length || !g.supported || !!(pr && pr.loading);
     };
     show();
     $("[data-pick]", p).onclick = async () => {
       const sel = await pick({ multiple: true, filters: [{ name: "Jogo do Switch", extensions: ["nsp", "xci", "nsz", "xcz", "nup"] }] });
-      if (sel) { picked[g.key] = Array.isArray(sel) ? sel : [sel]; show(); }
+      if (!sel) return;
+      const list = (picked[g.key] = Array.isArray(sel) ? sel : [sel]);
+      probed[g.key] = { loading: true, items: [] };
+      show();
+      let r;
+      try { r = { items: await invoke("probe_packages", { key: g.key, packages: list }) }; }
+      catch (e) { r = { error: String(e), items: [] }; }
+      if (picked[g.key] !== list) return; // escolheu outros arquivos enquanto lia
+      probed[g.key] = r;
+      if (files.isConnected) show();
     };
     btn.onclick = async () => {
+      // arquivo de outro jogo: avisa em linha antes de importar
+      if (otherGame(g).length) return askOtherGame(g, p);
       // já compilado: confirma em linha antes de substituir
       if (g.built && !p.querySelector("[data-reimport-yes]")) return askReimport(g, p);
       startImport(g.key);
     };
   },
 };
+
+// O que cada arquivo escolhido é, pelo `zaimport --probe` (lib.rs: probe_packages). Se a leitura
+// falhar (sem prod.keys, por exemplo), a lista fica sem etiqueta e a importação segue como antes.
+const KIND = { base: "Jogo base", update: "Atualização", dlc: "DLC", other: "Outro conteúdo" };
+const baseName = (f) => f.split(/[\\/]/).pop();
+
+function probeTag(pr, name) {
+  if (!pr || pr.error) return "";
+  if (pr.loading) return `<small>Lendo…</small>`;
+  const mine = pr.items.filter((it) => it.file === name);
+  if (!mine.length) return `<span class="pill warn">Não reconhecido</span>`;
+  const other = mine.find((it) => !it.matches);
+  if (other) return `<span class="pill warn">É de ${esc(other.game || `outro jogo (${other.title_id})`)}</span>`;
+  return `<small>${[...new Set(mine.map((it) => KIND[it.kind] || it.kind))].join(" + ")}</small>`;
+}
+
+// arquivos escolhidos que não são deste jogo (ou que o probe não reconheceu)
+function otherGame(g) {
+  const pr = probed[g.key];
+  if (!pr || pr.loading || pr.error) return [];
+  return (picked[g.key] || []).map(baseName).filter((name) => {
+    const mine = pr.items.filter((it) => it.file === name);
+    return !mine.length || mine.some((it) => !it.matches);
+  });
+}
+
+// Mesmo padrão do askReimport: confirmação na própria linha, foco no botão seguro
+function askOtherGame(g, p) {
+  const names = otherGame(g);
+  const um = names.length === 1;
+  const box = $(".actions", p);
+  box.classList.add("ask-box");
+  box.innerHTML = `
+    <span class="ask">${um ? "Um arquivo escolhido não é" : `${names.length} arquivos escolhidos não são`} do ${esc(g.name)}:
+      ${names.map((n) => `<strong>${esc(n)}</strong>`).join(", ")}. A importação ignora o que é de outro jogo e falha se faltar o jogo base certo.</span>
+    <button class="btn primary" data-other-no type="button">Escolher outros arquivos</button>
+    <button class="btn" data-other-yes type="button">Importar mesmo assim</button>`;
+  $("[data-other-yes]", box).onclick = () => (g.built ? askReimport(g, p) : startImport(g.key));
+  $("[data-other-no]", box).onclick = () => { renderTab(); $("[data-pick]").click(); };
+  $("[data-other-no]", box).focus({ preventScroll: true }); // um A apressado não importa o arquivo errado
+  syncKeys();
+}
 
 // Reimportar um jogo já compilado: o save fica em <pasta do programa>/save, fora da pasta do
 // jogo (<pasta dos jogos>/<jogo>), então a importação nunca toca nele (lib.rs: save_dir).
@@ -1125,6 +1184,7 @@ function command(c) {
     case "back": // B desfaz uma confirmação aberta antes de sair da página
       if (confirmCancel) return $("[data-cancel-no]")?.click();
       if ($("[data-reimport-no]")) return $("[data-reimport-no]").click();
+      if ($("[data-other-no]")) { renderTab(); return focusEl($("[data-pick]")); }
       if ($("[data-restore-no]")) return $("[data-restore-no]").click();
       if (restoring) return; // não sai da página no meio da restauração
       return closeGame();

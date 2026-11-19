@@ -230,10 +230,10 @@ fn list_games() -> Vec<GameState> {
                 mods: mods_for(&cfg, g),
                 version: fs::read_to_string(dir.join("version.txt")).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
                 dlcs: dlcs_in(&dir),
-                party: if g.key == "za" {
-                    party::load(&sd.join("main"), &Path::new(&cfg.runtime_dir).join("cache").join("party_icons"))
-                } else {
-                    vec![]
+                party: match g.key {
+                    "za" => party::load(&sd.join("main"), &Path::new(&cfg.runtime_dir).join("cache").join("party_icons"), &party::ZA),
+                    "arceus" => party::load(&sd.join("main"), &Path::new(&cfg.runtime_dir).join("cache").join("party_icons"), &party::ARCEUS),
+                    _ => vec![],
                 },
                 icon: fs::read(dir.join("icon.jpg")).ok().map(|b| {
                     use base64::Engine;
@@ -369,6 +369,62 @@ fn run_logged(jobs: &Jobs, key: &str, mut cmd: Command, base: f64, span: f64) ->
     let code = st.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into());
     let why = last_err.lock().unwrap().take();
     Err(why.unwrap_or_else(|| format!("terminou com código {code}")))
+}
+
+/// O que tem num pacote, segundo o `zaimport --probe` (nada é extraído)
+#[derive(Serialize)]
+struct ProbeItem {
+    file: String,
+    title_id: String,
+    kind: String,
+    /// nome do jogo no catálogo (None se o title id não for de nenhum jogo conhecido)
+    game: Option<String>,
+    /// true quando o conteúdo é do jogo que está sendo importado
+    matches: bool,
+}
+
+/// Lista o jogo de cada pacote escolhido, para avisar antes de importar o arquivo de outro jogo.
+#[tauri::command]
+async fn probe_packages(key: String, packages: Vec<String>) -> Result<Vec<ProbeItem>, String> {
+    let cfg = get_config();
+    let g = game_def(&key)?;
+    if !Path::new(&cfg.keys_path).is_file() {
+        return Err("prod.keys não encontrado: ajuste em Configurações".into());
+    }
+    let zaimport = Path::new(&cfg.runtime_dir).join("zaimport").join("zaimport.exe");
+    if !zaimport.is_file() {
+        return Err(format!("zaimport.exe não encontrado em {}", zaimport.display()));
+    }
+    let mut c = Command::new(&zaimport);
+    // o "out dir" é ignorado pelo --probe; vai a pasta temporária só para preencher o argumento
+    c.arg("--probe").arg(&cfg.keys_path).arg(std::env::temp_dir()).args(&packages);
+    c.creation_flags(CREATE_NO_WINDOW);
+    let out = tauri::async_runtime::spawn_blocking(move || c.stdin(Stdio::null()).output())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr).lines().chain(text.lines()).filter(|l| l.starts_with("error:")).last().map(str::to_string);
+        return Err(why.unwrap_or_else(|| format!("o zaimport --probe terminou com código {}", out.status.code().unwrap_or(-1))));
+    }
+    Ok(text
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.trim_end().split('\t').collect();
+            if f.len() != 4 || f[0] != "probe" {
+                return None;
+            }
+            let tid = f[2].to_uppercase();
+            Some(ProbeItem {
+                file: f[1].into(),
+                game: CATALOG.iter().find(|c| c.title_id == tid).map(|c| c.name.to_string()),
+                matches: tid == g.title_id,
+                title_id: tid,
+                kind: f[3].into(),
+            })
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -1002,7 +1058,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Jobs::default())
         .invoke_handler(tauri::generate_handler![
-            get_config, set_config, list_games, play_game, import_game, cancel_import, job_status, ensure_dir, mods_dir, check_paths, save_info,
+            get_config, set_config, list_games, play_game, import_game, probe_packages, cancel_import, job_status, ensure_dir, mods_dir, check_paths, save_info,
             restore_backup
         ])
         .run(tauri::generate_context!())
