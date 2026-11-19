@@ -191,7 +191,7 @@ body.nav-key .view-home:not(:has(#row:focus-within)) .tile.selected::after { box
 .info {
   position: absolute; z-index: 1; /* acima da #row, que vem depois no DOM e cobria Jogar/Opções */ top: calc(30 * var(--s)); left: calc(var(--pad) + var(--peek) + var(--tile-on) + 26px); right: var(--pad);
   height: calc(var(--tile-on) - var(--tile) - 14 * var(--s));
-  display: flex; flex-direction: column; justify-content: safe flex-end; gap: 8px;
+  display: flex; flex-direction: column; justify-content: flex-end; gap: 8px; /* sem "safe": meta que quebra linha cresce para cima, não sobre a miniatura */
 }
 /* título ancorado à capa: com miniaturas depois, assenta logo acima delas; sem nenhuma (último jogo da fileira),
    desce até a base da capa selecionada em vez de flutuar no terço de cima com o resto vazio */
@@ -294,6 +294,19 @@ h2 { margin: 0 0 12px; font-size: var(--fs-label); font-weight: 750; letter-spac
 .page-art .mono-art { padding: 18px 20px 0; font-size: calc(26 * var(--s)); }
 .page-title { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; min-width: 0; padding-bottom: 4px; }
 .page-title h1 { max-width: 100%; }
+/* cabeçalho compacto: o foco entrou nas abas/conteúdo; arte e título encolhem para o painel caber em 720p */
+.page-head, .page-title, .details { transition: padding 360ms var(--ease-move), gap 360ms var(--ease-move); }
+.page-art { transition: width 360ms var(--ease-move), height 360ms var(--ease-move), border-radius 360ms var(--ease-move); }
+.page-title h1 { transition: font-size 360ms var(--ease-move); }
+.view-game.compact .page-head { padding-top: 14px; gap: 18px; align-items: center; }
+.view-game.compact .page-art { width: 84px; height: 84px; border-radius: 12px; }
+.view-game.compact .page-title { gap: 4px; padding-bottom: 0; }
+.view-game.compact .page-title h1 { font-size: 30px; }
+.view-game.compact .tip { display: none; }
+.view-game.compact .details { padding-top: 16px; }
+/* compacto, o topo (Voltar, título, Jogar) fica preso: rolar fundo no Save não deixa o Voltar cortado ao meio */
+.view-game.compact { scroll-padding-top: calc(84px + 40px); }
+.view-game.compact .page-head { position: sticky; top: 0; z-index: 3; padding-bottom: 12px; background: oklch(12% 0.02 250 / 0.82); backdrop-filter: blur(16px); box-shadow: 0 1px 0 var(--edge); }
 .act.back { font-size: var(--fs-body); color: var(--ink-2); }
 .view-game .job { max-width: calc(900 * var(--s)); margin: 22px var(--pad) 0; }
 
@@ -334,7 +347,7 @@ h2 { margin: 0 0 12px; font-size: var(--fs-label); font-weight: 750; letter-spac
 .save-facts dd strong { font-weight: 700; font-variant-numeric: tabular-nums; }
 .pill.warn { background: color-mix(in oklch, var(--warn) 18%, transparent); color: var(--warn); }
 .save-sub { margin: 22px 0 6px; }
-.save > .lede { margin: 16px 0 0; }
+.save > .lede { margin: 16px 0 0; max-width: 60ch; }
 .save-sub .muted { text-transform: none; letter-spacing: 0; font-weight: 600; }
 .backups { margin: 0; padding: 0; list-style: none; }
 /* cada cópia: data, origem e as ações (Restaurar, Abrir pasta); a confirmação ocupa a linha inteira */
@@ -409,6 +422,7 @@ h2 { margin: 0 0 12px; font-size: var(--fs-label); font-weight: 750; letter-spac
 .keys { display: flex; gap: 22px; color: var(--ink-2); font-size: var(--fs-body); font-weight: 600; }
 .keys span { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; transition: opacity 200ms var(--ease-out); }
 .keys span.off { opacity: 0.4; }
+.keys .kl { font-style: normal; }
 
 /* ---------- configurações: folha lateral ---------- */
 .scrim { position: fixed; inset: 0; background: oklch(8% 0.01 250 / 0.55); opacity: 0; transition: opacity 280ms var(--ease-out); }
@@ -448,8 +462,21 @@ body.sheet-open .stage, body.sheet-open .topbar, body.sheet-open .hints { filter
 .save-warn { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 14px; background: color-mix(in oklch, var(--err) 14%, var(--glass-strong)); }
 .save-warn span { flex: 1 1 100%; }
 .save-warn[hidden], .check[hidden] { display: none; }
-/* versão do hub: rodapé discreto da folha */
-.sheet-ver { margin: auto 0 0; padding-top: 14px; color: var(--ink-3); font-size: var(--fs-body); }
+/* pé da folha: versão + dicas de botão; fica preso embaixo enquanto o formulário rola */
+.sheet-foot { position: sticky; bottom: -22px; margin: auto -26px -22px; padding: 12px 26px 16px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; background: var(--glass-strong); border-top: 1px solid var(--edge); }
+.sheet-foot .keys { gap: 16px; }
+.sheet-foot .keys:empty { display: none; }
+.sheet-ver { margin: 0; color: var(--ink-3); font-size: var(--fs-body); }
+/* 720p: a folha aperta o ritmo para caber sem rolar */
+@media (max-height: 780px) {
+  .sheet { padding-block: 16px 22px; }
+  .sheet header { margin-bottom: 10px; }
+  .sheet form { gap: 14px; }
+  .field { margin-top: 4px; }
+  .field input { padding-block: 8px; }
+}
+.facts dd:has(.fr-why) { align-items: flex-start; }
+.fr-why { flex: 0 0 100%; display: block; margin-top: 2px; color: var(--ink-3); font-weight: 500; font-size: var(--fs-body); text-transform: none; letter-spacing: 0; }
 
 /* ---------- aviso ---------- */
 /* ancorado logo acima do rodapé (--hints-h vem do main.js); não cobre título nem ações da página */
@@ -479,7 +506,14 @@ body.sheet-open .stage, body.sheet-open .topbar, body.sheet-open .hints { filter
   .info h1 { font-size: 26px; }
   .meta { gap: 0 14px; }
   .act { font-size: 18px; }
-  .keys { display: none; }
+  /* rodapé compacto: só os glifos; o rótulo fica para leitor de tela e no title */
+  body { grid-template-columns: minmax(0, 1fr); }
+  .hints { gap: 12px; padding: calc(10 * var(--s)) var(--pad) calc(14 * var(--s)); }
+  .status { display: block; flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .status .dot { display: inline-block; margin-right: 8px; vertical-align: 0.05em; }
+  .keys { flex: none; gap: 10px; }
+  .keys .lr { display: inline-flex; }
+  .keys .kl { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .facts div { grid-template-columns: 1fr; gap: 4px; }
   .save-facts { grid-template-columns: 1fr; }
   .save-facts div { padding: 10px 0; border-left: 0; border-top: 1px solid var(--edge); }

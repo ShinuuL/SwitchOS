@@ -263,16 +263,42 @@ function setView(v) {
     $("#row .tile.selected")?.focus({ preventScroll: true });
   }
 }
+// cabeçalho compacto: com o foco nas abas/conteúdo, arte e título encolhem para o conteúdo caber em 720p
+$("#view-game").addEventListener("focusin", (e) => {
+  $("#view-game").classList.toggle("compact", !$(".page-head").contains(e.target));
+});
 const openGame = (t) => { if (t) setTab(t); setView("game"); };
-// A / Enter / clique no selecionado: joga; sem compilação, leva para a seção Importação
+// A / Enter / clique no selecionado: com build, joga sempre (mesmo pedindo recompilação);
+// sem build nenhuma, leva para a seção Importação
 function primary() {
   const g = game();
   if (!g) return;
-  if (g.built && !g.needs_rebuild) return play();
+  if (g.built) return play();
+  if (view !== "game") openGame("import"); else setTab("import");
+  focusEl($("[data-pick]"));
+}
+// Recompilar é ação à parte: abre a Importação na caixa que explica o tempo e pede confirmação
+function openRebuild() {
   if (view !== "game") openGame("import"); else setTab("import");
   focusEl($("[data-rebuild]") || $("[data-pick]"));
 }
 const closeGame = () => setView("home");
+
+// Confirmação em linha ao ligar um mod que muda código (mesmo padrão das outras ask-box)
+function askModCode(b) {
+  $("[data-modcode]")?.remove();
+  const box = document.createElement("div");
+  box.className = "actions ask-box";
+  box.dataset.modcode = "";
+  box.innerHTML = `<span class="ask">Este mod muda código: o jogo vai precisar recompilar (os arquivos e o save não mudam).</span>
+    <button class="btn primary" data-modcode-yes type="button">Ligar mesmo assim</button>
+    <button class="btn" data-modcode-no type="button">Manter desligado</button>`;
+  b.closest("li").after(box);
+  $("[data-modcode-yes]", box).onclick = () => { box.remove(); b.dataset.ok = "1"; b.click(); };
+  $("[data-modcode-no]", box).onclick = () => { box.remove(); b.focus({ preventScroll: true }); syncKeys(); };
+  $("[data-modcode-no]", box).focus({ preventScroll: true }); // um A apressado não liga nada
+  syncKeys();
+}
 
 /* ---------- fundo ---------- */
 
@@ -307,24 +333,26 @@ function renderGame() {
   $("#g-name").textContent = g.name;
   $("#g-name").title = g.name; // nome longo corta com reticências; o inteiro fica na dica
 
-  const playLabel = playing ? "Abrindo…" : g.built ? (g.needs_rebuild ? "Recompilar" : "Jogar") : "Importar jogo";
+  const playLabel = playing ? "Abrindo…" : g.built ? "Jogar" : "Importar jogo";
+  const rebuildBtn = g.built && g.needs_rebuild && !jobs[g.key]?.running ? `<button class="act" data-act="rebuild" type="button">Recompilar</button>` : "";
   const playOff = playing ? "disabled" : "";
   const facts = `
     ${g.version ? `<span class="fact">Versão ${esc(g.version)}</span>` : ""}
     ${g.imported && g.dlcs.length ? `<span class="fact">DLC instalada</span>` : ""}
     ${g.mods.length ? `<span class="fact">${g.mods.length} mod${g.mods.length > 1 ? "s" : ""}</span>` : ""}
-    ${g.built && g.needs_rebuild ? `<span class="fact warn">Precisa recompilar</span>` : ""}
+    ${"" /* "Precisa recompilar" fica só no rodapé; aqui já há o botão Recompilar */}
     <span class="fact warn" data-syncfact ${unsynced(g) ? "" : "hidden"}>Save não sincronizado</span>`;
   $("#g-meta").innerHTML = `
     <button class="act play" data-act="play" type="button" ${playOff}><kbd class="b-a" data-k="a"></kbd>${playLabel}</button>
-    <button class="act" data-act="open" type="button"><kbd class="b-x" data-k="x"></kbd>Opções do jogo</button>${facts}`;
+    <button class="act" data-act="open" type="button"><kbd class="b-x" data-k="x"></kbd>Opções</button>${rebuildBtn}${facts}`;
   $("#p-meta").innerHTML = `
     <button class="act play" data-act="play" type="button" ${playOff}><kbd class="b-a" data-k="a"></kbd>${playLabel}</button>
-    <button class="act" data-act="folder" type="button"><kbd class="b-y" data-k="y"></kbd>Pasta do jogo</button>${facts}`;
+    <button class="act" data-act="folder" type="button"><kbd class="b-y" data-k="y"></kbd>Pasta do jogo</button>${rebuildBtn}${facts}`;
   $("#p-tip").hidden = !g.built;
   document.querySelectorAll('[data-act="play"]').forEach((b) => (b.onclick = primary));
   $('[data-act="open"]').onclick = () => openGame();
   $('[data-act="folder"]').onclick = openFolder;
+  document.querySelectorAll('[data-act="rebuild"]').forEach((b) => (b.onclick = openRebuild));
   $("#p-name").textContent = $("#p-name").title = g.name;
   $("#p-art").style.setProperty("--c", g.color);
   $("#p-art").innerHTML = g.icon ? `<img src="${g.icon}" alt="" draggable="false">` : `<span class="mono-art">${esc(shortName(g.name))}</span>`;
@@ -376,28 +404,31 @@ new MutationObserver((muts) => {
 
 // dicas do rodapé acompanham o contexto: camada aberta (erro, folha), confirmação, tela e foco
 function renderKeys(g) {
-  const k = (key, label, off = false) => `<span${off ? ' class="off"' : ""}><kbd class="b-${key === "menu" ? "lr" : key}" data-k="${key}"></kbd>${label}</span>`;
+  const k = (key, label, off = false) => `<span${off ? ' class="off"' : ""} title="${label}"><kbd class="b-${key === "menu" ? "lr" : key}" data-k="${key}"></kbd><i class="kl">${label}</i></span>`;
   const el = document.activeElement;
   let html;
   if (errorOpen()) html = k("a", "Selecionar") + k("b", "Fechar");
-  else if (settingsOpen()) html = k("a", "Selecionar") + k("b", "Voltar");
+  else if (settingsOpen()) html = k("a", "Selecionar") + k("b", "Fechar");
   else if (view === "game" && confirmCancel) html = k("a", "Selecionar") + k("b", "Continuar importando");
   else if (view === "game" && $("[data-reimport-no]")) html = k("a", "Selecionar") + k("b", "Manter como está");
   else if (view === "game" && $("[data-other-no]")) html = k("a", "Selecionar") + k("b", "Voltar");
   else if (view === "game" && $("[data-restore-no]")) html = k("a", "Selecionar") + k("b", "Manter como está");
+  else if (view === "game" && $("[data-modcode-no]")) html = k("a", "Selecionar") + k("b", "Manter desligado");
   else if (view === "game" && $("[data-import-no]")) html = k("a", "Selecionar") + k("b", "Manter como está");
   else if (view === "game" && restoring) html = `<span>${restoring === true ? "Restaurando o save…" : esc(restoring)}</span>`;
   // inicial: Jogar (A) e Opções (X) já aparecem ao lado do nome; o rodapé não repete
   // inicial: Jogar e Opções aparecem ao lado do nome (onde o mouse clica). No rodapé só voltam
   // no controle, menores e junto de Configurações, que é o lugar onde quem joga do sofá procura.
-  else if (view === "home") html = (inputMode === "pad" ? k("a", g.built ? (g.needs_rebuild ? "Recompilar" : "Jogar") : "Importar jogo", playing) + k("x", "Opções") : "") + k("menu", "Configurações");
+  else if (view === "home") html = (inputMode === "pad" ? k("a", g.built ? "Jogar" : "Importar jogo", playing) + k("x", "Opções") : "") + k("menu", "Configurações");
   else {
     const onBtn = el && $("#view-game").contains(el) && el.matches("button") && !el.matches('[data-act="play"]');
-    const aTxt = el?.matches("#tabs [role=tab]") ? "Entrar na seção" : onBtn ? "Selecionar" : g.built ? (g.needs_rebuild ? "Recompilar" : "Jogar") : "Importar jogo";
+    const aTxt = el?.matches("#tabs [role=tab]") ? "Entrar na seção" : onBtn ? "Selecionar" : g.built ? "Jogar" : "Importar jogo";
     html = k("a", aTxt, aTxt === "Jogar" && playing) + k("y", "Pasta do jogo") +
-      `<span class="lr"><kbd class="b-lr" data-k="lb"></kbd><kbd class="b-lr" data-k="rb"></kbd>Seções</span>` + k("b", "Voltar");
+      `<span class="lr" title="Seções"><kbd class="b-lr" data-k="lb"></kbd><kbd class="b-lr" data-k="rb"></kbd><i class="kl">Seções</i></span>` + k("b", "Voltar");
   }
   $("#keys").innerHTML = html;
+  // a folha cobre o canto do rodapé: repete as dicas no pé dela enquanto está aberta
+  $("#sheet-keys").innerHTML = settingsOpen() ? html : "";
   applyGlyphs();
 }
 function syncKeys() { const g = game(); if (g) renderKeys(g); else applyGlyphs(); }
@@ -459,6 +490,31 @@ function paintSync(key) {
   paintStatus(key);
   if (key === game()?.key) document.querySelectorAll("[data-syncfact]").forEach((f) => (f.hidden = !unsynced(g)));
 }
+const syncing = new Set(); // jogos com sync_save em andamento
+// Botão Sincronizar da aba Save: roda o switchos.py sync no backend e relê o estado do save
+async function runSync(g, btn) {
+  if (syncing.has(g.key)) return;
+  syncing.add(g.key);
+  if (btn) { btn.disabled = true; btn.textContent = "Sincronizando…"; }
+  let r, err = null;
+  try { r = await invoke("sync_save", { key: g.key }); if (!r?.ok) err = `sincronizar: ${r?.resumo || "falhou sem detalhes"}`; }
+  catch (e) { err = String(e); }
+  syncing.delete(g.key);
+  if (btn?.isConnected) { btn.disabled = false; btn.textContent = "Sincronizar"; }
+  if (err) return errorToast(explainSync(err));
+  await fetchSave(g, true);
+  if (tab === "save" && game()?.key === g.key) redrawSave(g, (body) => $("[data-sync]", body) || $("[data-save-folder]", body));
+  toast("Save sincronizado.");
+}
+// Erros do sync_save (sync.rs, todos com "sincronizar:") em linguagem clara
+function explainSync(raw) {
+  const text = String(raw ?? "").trim(), low = text.toLowerCase();
+  if (/jogo está aberto|conferir se o jogo/.test(low)) return { title: "Feche o jogo antes de sincronizar.", action: "Nada foi substituído. Feche o jogo e tente de novo.", detail: text };
+  if (/python não encontrado/.test(low)) return { title: "Python não encontrado", action: "A sincronização usa o switchos.py. Instale o Python (ou coloque-o no PATH) e tente de novo.", detail: text };
+  if (/importação em andamento/.test(low)) return { title: "Há uma importação em andamento", action: "Espere a importação deste jogo terminar e tente de novo.", detail: text };
+  if (/não configurada/.test(low)) return { title: "Sincronização não configurada", action: "O hub não achou o games.toml ao lado do switchos.py.", detail: text };
+  return { title: "A sincronização falhou.", action: "Nada foi substituído sem backup. Veja os detalhes para o motivo.", detail: text, unknown: true };
+}
 const restored = {}; // key -> { when, from, created } da última restauração (aviso fixo na aba)
 let restoring = false;
 const ORIGIN = { pc: "PC", android: "Android", cloud: "nuvem", "pre-restore": "PC, antes de uma restauração" };
@@ -493,7 +549,7 @@ function saveHTML(g, info) {
       ? `<strong>${fmtWhen(syncAt)}</strong><span class="muted">entre ${esc(sides)}</span>`
       : `<span class="muted">Nunca sincronizado</span>`}</dd></div>`);
     if (unsynced(g, info)) warn = `<p class="save-warnline"><span class="pill warn">O save deste PC mudou depois da última sincronização</span></p>
-      <p class="fine sync-how">Para levar esta versão para a nuvem e para o Android, rode na pasta do SwitchOS:<br><code class="cmd">python switchos.py sync ${esc(g.key)}</code></p>`;
+      <p class="fine sync-how">Sincronizar leva esta versão para a nuvem e para o Android. Antes de substituir qualquer save, o SwitchOS guarda o anterior como cópia de segurança.</p>`;
     const n = info.backups_total;
     head = `<p class="save-head">${n
       ? `Protegido por <strong>${n} cópia${n === 1 ? "" : "s"} de segurança</strong>.`
@@ -523,7 +579,9 @@ function saveHTML(g, info) {
     <div class="actions" data-zone>
       <button class="btn" data-save-folder type="button" ${local ? "" : "disabled"}>Abrir pasta do save</button>
       ${info?.cloud_exists ? `<button class="btn" data-cloud-folder type="button">Abrir cópia na nuvem</button>` : ""}
+      ${info && !info.error && info.sync_config ? `<button class="btn quiet" type="button" data-sync ${syncing.has(g.key) ? "disabled" : ""}>${syncing.has(g.key) ? "Sincronizando…" : "Sincronizar"}</button>` : ""}
     </div>
+    ${info && !info.error && info.sync_config && !warn ? `<p class="fine">Sincronizar guarda uma cópia de segurança antes de substituir qualquer save.</p>` : ""}
     ${body}
     ${importHTML(g, info)}
     <p class="fine">O save fica na pasta do programa, em <code>save</code>, fora da pasta do jogo. Importar o jogo de novo não mexe nele.</p>`;
@@ -537,6 +595,8 @@ function wireSave(g, p) {
   if (c) c.onclick = () => openPath(info.cloud_save).catch(() => toast("A cópia na nuvem não está mais lá."));
   $$("[data-backup]", p).forEach((el) => (el.onclick = () => openPath(el.dataset.backup).catch(() => toast("Essa cópia de segurança não está mais lá."))));
   $$("[data-restore]", p).forEach((el) => (el.onclick = () => askRestore(g, el.closest(".backup"))));
+  const sy = $("[data-sync]", p);
+  if (sy) sy.onclick = () => runSync(g, sy);
   wireImport(g, p);
 }
 
@@ -666,7 +726,7 @@ function importHTML(g, info) {
   const local = info?.local_modified ?? g.save_modified;
   const where = !src || src.error ? "" : src.synced
     ? "Antes de trocar, o save atual vira uma cópia de segurança (aparece na lista acima)."
-    : `Sem sincronização configurada, o save atual fica guardado em <code>${esc(src.backups_dir)}</code> antes da troca.`;
+    : `Sem sincronização configurada, o save atual fica guardado ${src.backups_dir ? `em <code>${esc(src.backups_dir)}</code>` : "numa cópia de segurança"} antes da troca.`;
   const done = imported[g.key];
   return `
     <h2 class="save-sub">Importar um save</h2>
@@ -785,17 +845,22 @@ async function loadSave(g) {
 
 /* ---------- primeira vez (lib.rs/firstrun.rs): verificar arquivos, ícones dos Pokémon e shaders, pelo zaprompts ---------- */
 
-const FR_STEPS = [["verify", "Arquivos do jogo"], ["icons", "Ícones dos Pokémon"], ["shaders", "Shaders"]];
+const FR_STEPS = [
+  ["verify", "Arquivos do jogo", "Confere se a extração saiu inteira. Costuma ser rápido."],
+  ["icons", "Ícones dos Pokémon", "As imagens do time que aparecem na tela inicial. Leva alguns minutos."],
+  ["shaders", "Shaders", "Prepara os efeitos gráficos antes, para o jogo não travar na primeira vez que os usa. Pode levar vários minutos."],
+];
 const FR_PILL = { feito: "ok", danificado: "warn", pendente: "", indisponivel: "" };
 let frTimer = null;
 const frWasRunning = {};
 
 function firstRunHTML(st, job) {
-  const rows = FR_STEPS.map(([k, label]) => {
-    const s = st[k];
-    return `<div><dt>${label}</dt><dd><span class="pill ${FR_PILL[s.state] ?? ""}">${esc(s.detail)}</span></dd></div>`;
+  st = st && typeof st === "object" ? st : {}; // status ausente: cada etapa aparece como "desconhecido"
+  const rows = FR_STEPS.map(([k, label, why]) => {
+    const s = st[k] || { state: "", detail: "Desconhecido" };
+    return `<div><dt>${label}</dt><dd><span class="pill ${FR_PILL[s.state] ?? ""}">${esc(s.detail ?? "Desconhecido")}</span><small class="fr-why">${why}</small></dd></div>`;
   }).join("");
-  const pending = FR_STEPS.some(([k]) => st[k].state === "pendente");
+  const pending = FR_STEPS.some(([k]) => st[k]?.state === "pendente");
   const running = job && job.running;
   const msg = running ? `<p class="fine">${esc(job.step)}… ${Math.round(job.progress * 100)}%</p>`
     : job && job.error ? `<p class="fine err">${esc(job.step)}: ${esc(job.error)}</p>` : "";
@@ -843,7 +908,7 @@ const paneHTML = {
       ? g.mods.map((m) => `<li class="mod${m.on ? "" : " off"}">
           <span class="mod-name"><strong>${esc(m.name)}</strong><small>${m.files} arquivo${m.files === 1 ? "" : "s"}${m.code ? " · muda o código" : ""}</small></span>
           <button class="switch" type="button" role="switch" aria-checked="${m.on}" data-mod="${esc(m.name)}"
-            aria-label="${m.on ? "Desligar" : "Ligar"} ${esc(m.name)}"><span class="switch-knob"></span></button>
+            data-code="${m.code ? 1 : ""}" aria-label="${m.on ? "Desligar" : "Ligar"} ${esc(m.name)}"><span class="switch-knob"></span></button>
         </li>`).join("")
       : `<li class="empty">Nenhum mod para este jogo ainda.</li>`}</ul>
     <button class="btn" data-mods-folder type="button">Abrir pasta de mods</button>
@@ -860,7 +925,7 @@ const paneHTML = {
     <ul class="list files" data-files></ul>
     <div class="actions">
       <button class="btn" data-pick type="button" ${g.supported ? "" : "disabled"}>Escolher arquivos</button>
-      <button class="btn primary" data-import type="button" disabled>Importar e compilar</button>
+      <button class="btn" data-import type="button" disabled>Importar e compilar</button>
     </div>`,
 };
 
@@ -873,10 +938,13 @@ const paneWire = {
     $$("[data-mod]", p).forEach((b) => (b.onclick = async () => {
       const on = b.getAttribute("aria-checked") !== "true";
       const name = b.dataset.mod;
+      // mod que muda código: confirma em linha antes de ligar (o jogo vai precisar recompilar)
+      if (on && b.dataset.code && !b.dataset.ok) return askModCode(b);
+      b.dataset.ok = "";
       b.disabled = true;
       try {
         const code = await invoke("set_mod_enabled", { key: g.key, name, on });
-        toast(`${name} ${on ? "ligado" : "desligado"}.${code ? " O próximo Jogar recompila o código do jogo." : ""}`);
+        toast(`${name} ${on ? "ligado" : "desligado"}.${code ? " Use Recompilar para o mod valer." : ""}`);
         await refresh();
       } catch (e) { b.disabled = false; fail(e); }
     }));
@@ -898,6 +966,8 @@ const paneWire = {
         return `<li><strong>${esc(name)}</strong>${probeTag(pr, name)}</li>`;
       }).join("");
       btn.disabled = !list.length || !g.supported || !!(pr && pr.loading);
+      // um primário por painel: desabilitado (ou com Recompilar agora na tela) o importar fica secundário
+      btn.classList.toggle("primary", !btn.disabled && !rb);
     };
     show();
     $("[data-pick]", p).onclick = async () => {
@@ -1109,7 +1179,7 @@ function errorToast(e, { logKey = null } = {}) {
     ev.currentTarget.setAttribute("aria-expanded", !d.hidden);
     ev.currentTarget.textContent = d.hidden ? "Ver detalhes" : "Ocultar detalhes";
   };
-  $(".toast-actions button", t).focus({ preventScroll: true });
+  $('[data-t="close"]', t).focus({ preventScroll: true }); // foco na ação segura
   requestAnimationFrame(syncKeys); // errorOpen() só vale depois do .on
 }
 function closeError(restore = true) {
@@ -1143,6 +1213,7 @@ async function watchJob(key, quiet = false) {
     jobs[key] = j;
     el.hidden = false;
     paintStatus(key);
+    if (!Array.isArray(j.log)) j.log = []; // job sem log (ou log em formato inesperado) não derruba o tick
     const ex = j.error ? explainError(j.error, games.find((x) => x.key === key), j.step) : null;
     el.dataset.state = j.running ? "run" : !ex ? "done" : ex.cancelled ? "cancel" : "err";
     $("[data-step]", el).textContent = ex ? ex.title : j.step;
@@ -1420,6 +1491,7 @@ function command(c) {
       if ($("[data-other-no]")) { renderTab(); return focusEl($("[data-pick]")); }
       if ($("[data-restore-no]")) return $("[data-restore-no]").click();
       if ($("[data-import-no]")) return $("[data-import-no]").click();
+      if ($("[data-modcode-no]")) return $("[data-modcode-no]").click();
       if (restoring) return; // não sai da página no meio da restauração
       return closeGame();
     case "a":

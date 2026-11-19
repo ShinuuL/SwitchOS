@@ -8,6 +8,7 @@ mod launch;
 mod mods;
 mod party;
 mod saveimport;
+mod sync;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1108,7 +1109,7 @@ pub fn run() {
         .manage(Jobs::default())
         .invoke_handler(tauri::generate_handler![
             get_config, set_config, list_games, play_game, set_mod_enabled, import_game, rebuild_game, probe_packages, cancel_import, job_status, ensure_dir, mods_dir, check_paths, save_info,
-            restore_backup, saveimport::import_sources, saveimport::check_import, saveimport::import_save, firstrun::firstrun_status, firstrun::firstrun_run
+            restore_backup, saveimport::import_sources, saveimport::check_import, saveimport::import_save, firstrun::firstrun_status, firstrun::firstrun_run, sync::sync_save
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o SwitchOS Hub");
