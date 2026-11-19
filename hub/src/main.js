@@ -430,7 +430,7 @@ function renderTab(animate = true) {
 /* ---------- aba Save: o que o switchos.py registra (lib.rs: save_info) e a restauração (restore_backup) ---------- */
 // O hub não sincroniza: mostra o save deste PC, a cópia na nuvem, a última sincronização e as cópias de
 // segurança (backups/<TID>/<AAAAMMDD-HHMMSS>-<origem>). Cada cópia pode ser restaurada (com confirmação em
-// linha; o save atual vira uma cópia "pc" antes) ou aberta na pasta.
+// linha; o save atual vira uma cópia "pre-restore" antes) ou aberta na pasta.
 const saveCache = {}; // key -> resultado de save_info (ou { error })
 // Save deste PC mais novo que a última sincronização. Sem sync configurada (ou erro de leitura): false,
 // porque isso não é um problema do jogo e a inicial não deve avisar nada.
@@ -458,7 +458,7 @@ function paintSync(key) {
 }
 const restored = {}; // key -> { when, from, created } da última restauração (aviso fixo na aba)
 let restoring = false;
-const ORIGIN = { pc: "PC", android: "Android", cloud: "nuvem" };
+const ORIGIN = { pc: "PC", android: "Android", cloud: "nuvem", "pre-restore": "PC, antes de uma restauração" };
 const originName = (o) => ORIGIN[o] || o;
 // "20261118-153000" (hora local, como o switchos.py grava) -> Date
 const stampDate = (s) => { const m = /^(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)(\d\d)$/.exec(s); return m ? new Date(m[1], m[2] - 1, m[3], m[4], m[5], m[6]) : null; };

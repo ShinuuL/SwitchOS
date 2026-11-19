@@ -751,7 +751,8 @@ fn save_info(key: String) -> Result<SaveInfo, String> {
                     if d.len() != 8 || t.len() != 6 || !d.chars().chain(t.chars()).all(|c| c.is_ascii_digit()) {
                         return None;
                     }
-                    let origin = rest.split('-').next().unwrap_or(rest).to_string();
+                    // "pre-restore" (o save antes de uma restauração) é a única origem com hífen
+                    let origin = if rest.starts_with("pre-restore") { "pre-restore".into() } else { rest.split('-').next().unwrap_or(rest).to_string() };
                     Some(BackupInfo { stamp: format!("{d}-{t}"), origin, path: e.path().to_string_lossy().into(), name })
                 })
                 .collect()
@@ -873,7 +874,7 @@ fn backup_like_switchos(src: &Path, bdir: &Path, origin: &str, keep: i64, stamp:
 }
 
 /// Restaura <bdir>/<name> em `save`: copia para uma pasta irmã temporária, guarda o save atual
-/// como cópia "pc" e só então troca as pastas com rename (o replace_tree do switchos.py).
+/// como cópia "pre-restore" (keep_backups + 1, como o switchos.py restore) e só então troca as pastas com rename (o replace_tree do switchos.py).
 /// Se a troca falhar, o save antigo volta para o lugar; ele também fica na cópia recém-criada.
 /// Devolve o nome da cópia criada (None quando não havia save atual).
 fn restore_into(bdir: &Path, name: &str, save: &Path, keep: i64, stamp: &str) -> Result<Option<String>, String> {
@@ -896,7 +897,7 @@ fn restore_into(bdir: &Path, name: &str, save: &Path, keep: i64, stamp: &str) ->
         return Err(format!("restaurar: não copiou a cópia escolhida ({e})"));
     }
     let created = if save.exists() {
-        match backup_like_switchos(save, bdir, "pc", keep, stamp, &[name]) {
+        match backup_like_switchos(save, bdir, "pre-restore", if keep > 0 { keep + 1 } else { keep }, stamp, &[name]) {
             Ok(n) => Some(n),
             Err(e) => {
                 let _ = fs::remove_dir_all(&tmp);
@@ -1028,12 +1029,12 @@ mod restore_tests {
         assert!(restore_into(&bdir, "20991231-000000-pc", &save, 10, "20261118-120000").is_err());
         assert_eq!(fs::read(save.join("main")).unwrap(), b"current");
 
-        // keep=2: o switchos.py apagaria só a mais antiga (a escolhida): ela é poupada e nada mais sai
+        // keep=2 vira 3 na restauração (como o switchos.py restore): com 3 cópias nada sai, e a escolhida é sempre poupada
         let created = restore_into(&bdir, "20260101-000000-cloud", &save, 2, "20261118-120000").unwrap();
-        assert_eq!(created.as_deref(), Some("20261118-120000-pc"));
+        assert_eq!(created.as_deref(), Some("20261118-120000-pre-restore"));
         assert_eq!(fs::read(save.join("main")).unwrap(), b"old");
         assert_eq!(fs::read(save.join("sub").join("x")).unwrap(), b"x");
-        assert_eq!(fs::read(bdir.join("20261118-120000-pc").join("main")).unwrap(), b"current");
+        assert_eq!(fs::read(bdir.join("20261118-120000-pre-restore").join("main")).unwrap(), b"current");
         assert!(bdir.join("20260101-000000-cloud").is_dir());
         assert!(bdir.join("20260102-000000-pc").is_dir());
         assert!(!d.join("save").join("save_0.switchos-tmp").exists());
@@ -1041,7 +1042,7 @@ mod restore_tests {
 
         // mesmo segundo: ganha o sufixo -1, como no switchos.py
         let again = restore_into(&bdir, "20260101-000000-cloud", &save, 0, "20261118-120000").unwrap();
-        assert_eq!(again.as_deref(), Some("20261118-120000-pc-1"));
+        assert_eq!(again.as_deref(), Some("20261118-120000-pre-restore-1"));
         let _ = fs::remove_dir_all(&d);
     }
 
