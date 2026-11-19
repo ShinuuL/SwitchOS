@@ -4,9 +4,14 @@ Atualizado em 19/11/2026.
 
 ## Próximos passos, por prioridade
 
-1. **Hub 0.0.2:** trazer para o hub o que hoje só a tela do ZA Recomp faz (lista abaixo).
-2. **Arceus no PC:** piscar de texturas e atraso nas cutscenes. Precisa do usuário jogando.
-3. **Projetos maiores:** escala de resolução do Arceus no Android; outros jogos no runtime unificado.
+Foco (decidido em 19/11): os dois jogos que temos (Z-A e Arceus) no PC. Android e outros jogos ficam para depois.
+
+1. **Arceus a 60 fps no PC, como o Z-A.** Em andamento. Pista do Android: `main+0x277d838` liga o present interval 1, mas o mundo anda 2x mais rápido; falta ligar o passo do mundo ao tempo real (como o `FRAME_DT` do Z-A em `framepace.c`).
+2. **Arceus no PC:** ícones do time (o `zaprompts` não lê o romfs do Arceus), piscar de texturas e atraso nas cutscenes (estes dois precisam do usuário jogando).
+3. **Hub 0.0.2:** teste manual das telas novas (primeira vez, importar save, mods, recompilar).
+4. **Depois:** escala de resolução do Arceus no Android; outros jogos no runtime unificado.
+
+Dumps em `D:\Games\Dumps`, organizados por jogo (`Arceus/`, `Z-A/`: Base, Atualizacao, DLC, Traducao); `prod.keys` e `title.keys` na raiz.
 
 ## Hub 0.0.2: compilador integrado e entrada direta no jogo
 

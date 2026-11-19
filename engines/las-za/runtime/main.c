@@ -107,6 +107,8 @@ static void rtld_init_main(Cpu *c) {
         for (int i = 2; i < g_nmodules; i++) module_init(c, &g_modules[i]);
         if (g_nmodules > g_ngame_modules) hooks_capture();  // (SwitchOS: only code mods write hooks; the game's own subsdks don't)
     }
+    extern void pla_framepace_install(void);  // (SwitchOS: Arceus' 60 fps, runtime/hle/framepace.c; other games: nothing)
+    pla_framepace_install();
     module_init(c, &g_modules[0]);
 }
 static void rtld_fini(Cpu *c) { (void)c; LOG("nnMain returned\n"); }

@@ -1007,6 +1007,8 @@ static void present_pace(int interval) {
     if (forced >= 0) interval = forced;
     extern bool g_za_mode_dyn, g_za_mode_dyn_interval;  // (framepace.c: the game's 30 fps mode on frames that are behind -
     if (g_za_mode_dyn && !g_za_mode_dyn_interval && forced < 0 && interval > 1) interval = 1;  // paced as 60 unless =2)
+    extern bool g_pla_fps60_on;  // (framepace.c pla_set_preset: Arceus at 60 fps - its interval 2, its world stepped by
+    if (g_pla_fps60_on && forced < 0 && interval == 2) interval = 1;  // the vsyncs that passed: presented every vsync)
     static int logged = -12345;
     if (interval != logged && !g_za_mode_dyn_interval) { logged = interval; LOG("[nvn] present interval %d\n", interval); }
     extern int g_out_present_interval;  // (output_scale.c: dynamic resolution's frame budget)

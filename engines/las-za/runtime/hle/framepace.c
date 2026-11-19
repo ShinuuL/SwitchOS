@@ -668,3 +668,93 @@ uint8_t rt_za_smooth_anim(uint8_t flag) {  // (the first channel's flag, read at
     if (g_anim_policies) return flag;  // (the policies set it themselves, for both channels)
     return g_settings.smooth_anim ? 1 : flag;
 }
+
+// ---- SwitchOS: Pokémon Legends: Arceus at 60 fps (main build aee8f150dda1b5a8, the 1.1.1 update). No game patch:
+// GAMELIB_ID stays as it is, so nobody's game code needs building again. What the game does (main+ offsets):
+//   - its start-up builds the display settings on the stack (main+0x277d838: `mov x8, #1`, the word at +0x70 of
+//     them) and its display setup sets the window's present interval to that word + 1 (main+0x2aa2788): 2, 30 fps.
+//   - its time object (made at main+0x277bd74, kept at main+0x42ec1f8) holds 4 time channels {?, step in ns} at
+//     +0x78 (sub-object at +0x70, vtable main+0x4171538: get main+0x278303c, set by preset main+0x2783048, set in ns
+//     main+0x277bef4, count main+0x2783060 = 4). Presets (main+0x397e8d0): index k = k + 1 vsyncs (16666667,
+//     33333334, ...). Its frame loop (main+0x27812d8) hands channel 1's step in seconds to the world
+//     (main+0x27814b4 -> main+0x282841c; also the task update at main+0x279a6d0 -> main+0x2795204), then sets every
+//     channel to preset 1 (`mov w2, #1`, main+0x2781500..0x27815d4) - a fixed 1/30 s, whatever the frame took, and
+//     channel 2 to 0 ns. So presenting every vsync alone (the Android fork's test of the interval word) ran the world
+//     twice as fast.
+// With the fps60 setting (or LARECOMP_FPS=60; the same 50 fps fallback as Z-A, fps60_holds) the window presents
+// every vsync (runtime/nvn/objects.c present_pace: interval 2 -> 1) and the preset setter is overridden (hle_override:
+// the loop calls it through the vtable): preset 1 becomes the vsyncs that really passed since the last frame - 1
+// (an accumulator of the wall clock in 1/60 s steps; at most 2 vsyncs, the game's own 30 fps step, below 30 fps it
+// slows down as on the Switch). F1 > Constant game speed off: always 1 vsync (slow motion below 60, as Z-A without it).
+// fps60 off: the preset is the game's own, the interval 2 - as before.
+//   LARECOMP_LOG_FRAMEPACE=1  every 120th frame: the mode, the steps handed on and the frames seen
+//   LARECOMP_PLA_FPS60=0      no override at all (the game as it was, whatever fps60 says)
+bool g_pla_frame_hook;  // (the game is Arceus 1.1.1 and the override is in: the F1 menu offers the frame rate)
+bool g_pla_fps60_on;    // (this frame runs at 60: present_pace presents every vsync)
+static GuestFn g_pla_set_preset_orig;
+static void pla_set_preset(Cpu *c) {
+    // x0 the channels, w1 the channel, w2 the preset (k + 1 vsyncs). The frame loop's calls are channel 0..3 with 1
+    static uint32_t steps = 2;
+    static uint64_t last_ns;
+    static int64_t acc;
+    static uint64_t frames, n1, n2;
+    uint32_t ch = (uint32_t)c->x[1], preset = (uint32_t)c->x[2];
+    if (ch == 0) {  // (the first of a frame's four: the frame's step)
+        const char *e = ENV("LARECOMP_FPS");
+        const PaceRec *pr = pace_replayed();
+        bool on = pr ? pr->on != 0 : e ? atoi(e) >= 60 : fps60_holds();
+        uint64_t now = plat_now_ns();
+        if (!on) {
+            steps = 2, acc = 0;
+        } else if (!g_settings.frame_dt) {
+            steps = 1, acc = 0;
+        } else {
+            // the wall clock in vsyncs: a 17 ms frame then a 16 ms one still make two steps of 1
+            if (!g_pla_fps60_on || !last_ns) acc = 16666667;  // (just switched on: one step)
+            else acc += (int64_t)(now - last_ns);
+            steps = (uint32_t)(acc / 16666667);
+            if (steps < 1) steps = 1;
+            if (steps > 2) steps = 2, acc = 2 * 16666667ll;  // (a long stall: no catching up beyond the 30 fps step)
+            acc -= (int64_t)steps * 16666667;
+            if (acc < -16666667) acc = -16666667;  // (frames run early: owe at most one vsync)
+        }
+        last_ns = now;
+        if (on != g_pla_fps60_on) LOG("[pace] Arceus: %s\n", on ? "60 fps (present every vsync, world step = vsyncs passed)" : "30 fps (as is)");
+        g_pla_fps60_on = on;
+        frames++, steps == 1 ? n1++ : n2++;
+        static int log = -1;
+        if (log < 0) log = ENV("LARECOMP_LOG_FRAMEPACE") != NULL;
+        if (log && frames % 120 == 0)
+            LOG("[framepace] Arceus frame %llu: %s, step %u vsync(s) = %.2f ms; frames with 1 step %llu, 2 steps %llu\n",
+                (unsigned long long)frames, on ? "60 fps" : "30 fps", steps, steps * 16.666667,
+                (unsigned long long)n1, (unsigned long long)n2);
+    }
+    if (preset == 1 && g_pla_fps60_on) c->x[2] = steps - 1;  // (preset 1 is the loop's fixed 1/30 s)
+    else if (preset != 1) {
+        static int odd;
+        if (odd++ < 4) LOG("[pace] Arceus: preset %u for channel %u (not the frame loop's): as is\n", preset, ch);
+    }
+    uint64_t chans = c->x[0];
+    g_pla_set_preset_orig(c);
+    static int vlog = -1;  // (LARECOMP_LOG_FRAMEPACE: what the world will read next frame - channel 1's step)
+    if (vlog < 0) vlog = ENV("LARECOMP_LOG_FRAMEPACE") != NULL;
+    static uint64_t nch1;
+    if (vlog && ch == 1 && nch1++ % 600 == 0)
+        LOG("[framepace] Arceus channel 1: step %lld ns (%lld)\n", (long long)*(int64_t *)(uintptr_t)(chans + 0x20),
+            (long long)*(int64_t *)(uintptr_t)(chans + 0x18));
+}
+void pla_framepace_install(void) {
+    static const uint8_t b111[8] = {0xAE, 0xE8, 0xF1, 0x50, 0xDD, 0xA1, 0xB5, 0xA8};
+    if (!g_nmodules || memcmp(g_main_build_id, b111, 8)) return;
+    const char *e = ENV("LARECOMP_PLA_FPS60");
+    if (e && !atoi(e)) { LOG("[pace] Arceus: 60 fps support off (LARECOMP_PLA_FPS60=0)\n"); return; }
+    uint64_t at = g_modules[0].base + 0x2783048;
+    static const uint32_t code[6] = {0xf0008fc8, 0x91234108, 0xf862d902, 0xf9400008, 0xf9400903, 0xd61f0060};
+    if (memcmp((const void *)(uintptr_t)at, code, sizeof code) || !(g_pla_set_preset_orig = dispatch_lookup(at))) {
+        LOG("[pace] Arceus: the time channels' setter not recognised: 30 fps only\n");
+        return;
+    }
+    hle_override(at, pla_set_preset, "pla_set_preset");
+    g_pla_frame_hook = true;
+    LOG("[pace] Arceus: frame rate hook in (main+0x2783048)\n");
+}

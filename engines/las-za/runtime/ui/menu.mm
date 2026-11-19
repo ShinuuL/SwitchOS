@@ -576,8 +576,8 @@ static void tab_display(bool in_game) {
         // rate, and whether 60 falls back to 30 by itself (fps60_lock off) - that fallback is the player's own choice,
         // the recommended settings (settings.c) set 60 without it. Shown on the start screen too (saved for the next
         // start); in game only with the frame hook (a supported game version).
-        extern bool g_za_frame_hook, g_fps60_fell_back;
-        if (!in_game || g_za_frame_hook) {  // (g_game_is_la stays 1 until the boot: no help on the start screen)
+        extern bool g_za_frame_hook, g_pla_frame_hook, g_fps60_fell_back;  // (SwitchOS: Arceus 1.1.1 too, framepace.c)
+        if (!in_game || g_za_frame_hook || g_pla_frame_hook) {  // (g_game_is_la stays 1 until the boot: no help on the start screen)
             int fr = g_settings.fps60 ? 1 : 0;
             const char *rates[] = {TR("30 fps (Switch)", "30 fps (Switch)"), "60 fps"};
             if (opt_choice(TR("Frame rate", "Taxa de quadros"), &fr, rates, 2, 0,
