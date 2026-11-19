@@ -21,6 +21,12 @@ Testes que só dão para fazer jogando ou olhando a janela. Marque com [x] e ano
 
 - [ ] Jogando pelo hub: título da janela "Pokémon Legends: Arceus — SwitchOS" (acentos e travessão certos, também na barra de tarefas).
 
+## Gravação no hub
+
+- [ ] **Gravar sessão** no Arceus até o chão piscar e até uma cutscene com atraso (F8 em cada vez); mandar a pasta (Configurações > Pasta das gravações).
+- [ ] **Gravar vídeo**: o `video.mp4` mostra o jogo e o jogo não perde fps gravando.
+- [ ] Jogar normal: `logs/play.log` é criado (o jogo não herda mais a saída do hub).
+
 ## Z-A no PC
 
 - [ ] Aberto pela tela inicial do ZA Recomp: título continua "ZA Recomp" e a verificação dos arquivos funciona.

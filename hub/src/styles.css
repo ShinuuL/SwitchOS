@@ -370,6 +370,20 @@ h2 { margin: 0 0 12px; font-size: var(--fs-label); font-weight: 750; letter-spac
 @keyframes turn { to { transform: rotate(1turn); } }
 .save-done { margin: 10px 0 12px; padding: 10px 14px; border-radius: 14px; max-width: 68ch; color: var(--ink-2); background: color-mix(in oklch, var(--ok) 12%, transparent); }
 .save-done strong { display: block; color: var(--ok); }
+/* Gravar sessão: ponto vermelho no botão, pulsando enquanto grava; painel do fim com caminho e anotação */
+.rec-dot { width: 12px; height: 12px; margin: 0 2px 0 8px; border-radius: 50%; background: var(--err); box-shadow: 0 0 0 3px color-mix(in oklch, var(--err) 25%, transparent); }
+.rec-btn.on .rec-dot { animation: rec-pulse 1.2s ease-in-out infinite; }
+.rec-btn:disabled .rec-dot { background: var(--off); box-shadow: none; }
+@keyframes rec-pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .rec-btn.on .rec-dot { animation: none; } }
+.fact.rec { color: var(--err); }
+.rec-done { display: grid; gap: 6px; margin-top: 10px; }
+.rec-done .rec-path { color: var(--ink); font: 500 var(--fs-mono) "Cascadia Mono", Consolas, monospace; overflow-wrap: anywhere; }
+.rec-done .rec-warn { color: var(--warn); }
+.rec-note { display: grid; gap: 4px; }
+.rec-note textarea { padding: 8px 12px; border: 0; border-radius: 12px; resize: vertical; background: oklch(8% 0.01 250 / 0.6); box-shadow: inset 0 0 0 1px var(--edge); color: var(--ink); font: inherit; caret-color: var(--ring); }
+.rec-note textarea:focus { outline: none; box-shadow: inset 0 0 0 2px var(--ring); }
+.rec-done .b-acts { justify-content: flex-start; }
 .list { margin: 0 0 16px; padding: 0; list-style: none; }
 .list li { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--edge); }
 .list li small { color: var(--ink-3); font-variant-numeric: tabular-nums; }

@@ -25,4 +25,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-dialog = "2"
 dirs = "5"
+chrono = "0.4"
+
+# "Gravar sessão" (record.rs): vídeo da janela do jogo por Windows.Graphics.Capture + Media Foundation (H.264/MP4),
+# dentro do próprio hub - nada a instalar nem exe auxiliar. MIT.
+[target.'cfg(windows)'.dependencies]
+windows-capture = "2.0.1"
 

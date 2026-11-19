@@ -344,15 +344,21 @@ function renderGame() {
     <span class="fact warn" data-syncfact ${unsynced(g) ? "" : "hidden"}>Save não sincronizado</span>`;
   $("#g-meta").innerHTML = `
     <button class="act play" data-act="play" type="button" ${playOff}><kbd class="b-a" data-k="a"></kbd>${playLabel}</button>
-    <button class="act" data-act="open" type="button"><kbd class="b-x" data-k="x"></kbd>Opções</button>${rebuildBtn}${facts}`;
+    <button class="act" data-act="open" type="button"><kbd class="b-x" data-k="x"></kbd>Opções</button>${rebuildBtn}${recFact(g)}${facts}`;
   $("#p-meta").innerHTML = `
     <button class="act play" data-act="play" type="button" ${playOff}><kbd class="b-a" data-k="a"></kbd>${playLabel}</button>
-    <button class="act" data-act="folder" type="button"><kbd class="b-y" data-k="y"></kbd>Pasta do jogo</button>${rebuildBtn}${facts}`;
+    <button class="act" data-act="folder" type="button"><kbd class="b-y" data-k="y"></kbd>Pasta do jogo</button>${rebuildBtn}${recordBtn(g)}${facts}`;
   $("#p-tip").hidden = !g.built;
+  $("#p-tip").textContent = recOn(g.key) && rec.video_only ? "Gravando só o vídeo da janela do jogo." : recOn(g.key) ? "Gravando: no jogo, aperte F8 quando o bug aparecer (marca o momento no replay)." : "No jogo, F1 abre as configurações gráficas e de controles.";
   document.querySelectorAll('[data-act="play"]').forEach((b) => (b.onclick = primary));
   $('[data-act="open"]').onclick = () => openGame();
   $('[data-act="folder"]').onclick = openFolder;
   document.querySelectorAll('[data-act="rebuild"]').forEach((b) => (b.onclick = openRebuild));
+  const rb = $('[data-act="record"]');
+  if (rb) rb.onclick = () => (recOn(g.key) ? stopRecord() : startRecord());
+  const rv = $('[data-act="record-video"]');
+  if (rv) rv.onclick = () => startRecord(true);
+  renderRecDone(g);
   $("#p-name").textContent = $("#p-name").title = g.name;
   $("#p-art").style.setProperty("--c", g.color);
   $("#p-art").innerHTML = g.icon ? `<img src="${g.icon}" alt="" draggable="false">` : `<span class="mono-art">${esc(shortName(g.name))}</span>`;
@@ -1126,6 +1132,108 @@ function watchPlay(key) {
   setTimeout(tick, 1000);
 }
 
+/* ---------- gravar sessão (lib.rs/record.rs) ---------- */
+
+// "Gravar sessão" abre o jogo como o Jogar, gravando o vídeo da janela, a entrada e o replay do runtime numa pasta
+// própria (Configurações > Pasta das gravações). Parar (ou fechar o jogo) junta logs e info; o painel #rec-done mostra
+// onde ficou, com a anotação (notas.txt) e o Abrir pasta.
+let rec = null; // record_status: a gravação atual ou a última
+let recTimer = null;
+let recNoteOpen = null; // pasta da sessão cujo painel está aberto (Fechar esconde)
+const recOn = (key) => rec && rec.key === key && !rec.done;
+const clock = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+function recLabel() {
+  if (!rec || rec.done) return "";
+  if (rec.recording) return `Gravando ${clock(rec.seconds)}`;
+  if (rec.waiting) return "Gravando: esperando a janela do jogo…";
+  return `Gravando só entrada e logs ${clock(rec.seconds)}`; // o vídeo falhou: o resto continua
+}
+function recFact(g) {
+  return recOn(g.key) ? `<span class="fact rec" data-recfact>${esc(recLabel())}</span>` : "";
+}
+function recordBtn(g) {
+  if (!g.built) return "";
+  if (recOn(g.key)) return `<button class="act rec-btn on" data-act="record" type="button"><span class="rec-dot" aria-hidden="true"></span>Parar gravação</button>${recFact(g)}`;
+  // (outra gravação com o jogo aberto: uma de cada vez)
+  const off = playing || (rec && !rec.done) ? "disabled" : "";
+  // Gravar sessão: vídeo + entrada + replay + logs, para reproduzir um bug; Gravar vídeo: só o vídeo (gameplay comum)
+  return `<button class="act rec-btn" data-act="record" type="button" ${off} title="Vídeo da janela, entrada, replay e logs, para mandar a um desenvolvedor"><span class="rec-dot" aria-hidden="true"></span>Gravar sessão</button>
+    <button class="act rec-btn" data-act="record-video" type="button" ${off} title="Só o vídeo da janela do jogo"><span class="rec-dot" aria-hidden="true"></span>Gravar vídeo</button>`;
+}
+async function startRecord(videoOnly = false) {
+  const g = game();
+  if (!g?.built || playing || restoring) return;
+  if (g.needs_rebuild) return openRebuild();
+  playing = true;
+  renderGame();
+  try { rec = await invoke("record_start", { key: g.key, videoOnly }); }
+  catch (e) {
+    playing = false; renderGame(); keepFocus();
+    if (String(e).startsWith(NEEDS_REBUILD)) { await refresh(); return openRebuild(); }
+    return fail(e);
+  }
+  recNoteOpen = null;
+  setTimeout(() => { playing = false; renderGame(); }, 3000);
+  watchPlay(g.key);
+  toast(videoOnly ? "Gravando o vídeo do jogo." : "Gravando. No jogo, aperte F8 quando o bug aparecer.");
+  watchRecord();
+}
+async function stopRecord() {
+  try { rec = await invoke("record_stop"); } catch (e) { return fail(e); }
+  recordEnded();
+}
+function recordEnded() {
+  recNoteOpen = rec?.dir ?? null;
+  renderGame();
+  const g = game();
+  if (g && rec?.key === g.key && view === "game") focusEl($("#rec-done [data-rec-note]"));
+  toast(`Gravação salva em ${rec.dir}`);
+}
+function watchRecord() {
+  clearInterval(recTimer);
+  recTimer = setInterval(async () => {
+    const r = await invoke("record_status").catch(() => null);
+    if (!r) return;
+    const was = rec;
+    rec = r;
+    if (!was?.done && r.done) return recordEnded();
+    // depois do Parar, o jogo fechando ainda junta o log completo e o replay: atualiza a lista e então para
+    if (r.done && !r.game_open) { clearInterval(recTimer); recTimer = null; renderRecDone(game()); return; }
+    if (!r.done) {
+      const t = recLabel();
+      $$("[data-recfact]").forEach((el) => (el.textContent = t));
+    }
+  }, 1000);
+}
+function renderRecDone(g) {
+  const box = $("#rec-done");
+  const show = g && rec && rec.done && rec.key === g.key && recNoteOpen === rec.dir;
+  if (!show) { if (!box.hidden) { box.hidden = true; box.innerHTML = ""; box.dataset.dir = ""; } return; }
+  // (redesenhar no meio da anotação perderia o texto: só a lista de arquivos muda)
+  const files = `Arquivos: ${esc(rec.files.join(", ") || "nenhum ainda")}${rec.game_open && !rec.video_only ? ". O log completo e o replay entram quando o jogo fechar." : "."}`;
+  if (!box.hidden && box.dataset.dir === rec.dir) { $("[data-rec-files]", box).textContent = files; return; }
+  box.dataset.dir = rec.dir;
+  box.innerHTML = `
+    <strong>Gravação salva</strong>
+    <span class="rec-path">${esc(rec.dir)}</span>
+    ${rec.video_error ? `<span class="rec-warn">Sem vídeo: ${esc(rec.video_error)}.</span>` : ""}
+    <small data-rec-files>${files}</small>
+    <label class="rec-note"><span>O que aconteceu e em que segundo do vídeo (opcional)</span>
+      <textarea data-rec-note rows="2" placeholder="Ex.: 0:42 o chão pisca; 1:15 o Pokémon aparece tarde na cutscene"></textarea></label>
+    <div class="b-acts">
+      <button class="btn primary" data-rec-save type="button">Salvar anotação</button>
+      <button class="btn" data-rec-open type="button">Abrir pasta</button>
+      <button class="btn" data-rec-close type="button">Fechar</button>
+    </div>`;
+  box.hidden = false;
+  $("[data-rec-save]", box).onclick = async () => {
+    try { await invoke("record_note", { text: $("[data-rec-note]", box).value }); toast("Anotação salva em notas.txt."); }
+    catch (e) { fail(e); }
+  };
+  $("[data-rec-open]", box).onclick = () => openPath(rec.dir).catch(() => toast("A pasta da gravação não está mais lá."));
+  $("[data-rec-close]", box).onclick = () => { recNoteOpen = null; renderRecDone(game()); keepFocus(); };
+}
+
 function openFolder() {
   openPath(game().dir).catch(() => toast("A pasta do jogo ainda não existe. Importe o jogo primeiro."));
 }
@@ -1434,7 +1542,7 @@ const typing = () => /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.ta
 /* ---------- zonas de foco: cima/baixo trocam de zona, esquerda/direita andam dentro dela ---------- */
 
 const visible = (e) => !!e && !e.disabled && !e.closest("[hidden], [inert]") && e.getClientRects().length > 0;
-const focusables = (root) => (root ? $$("button, input, [tabindex]:not([tabindex='-1'])", root).filter(visible) : []);
+const focusables = (root) => (root ? $$("button, input, textarea, [tabindex]:not([tabindex='-1'])", root).filter(visible) : []);
 // Painel da aba: uma zona só, ou uma por [data-zone] (a lista de backups anda linha a linha com cima/baixo)
 function paneZones() {
   const p = $("#pane");
@@ -1448,7 +1556,7 @@ function zones() {
     ? [{ id: "setup", els: focusables($("#setup")) }, { id: "act", els: focusables($("#g-meta")) }, { id: "row", els: [$("#row .tile.selected")] },
        { id: "empty", els: [...focusables($("#empty")), ...focusables($("#load-error"))] }]
     // ordem visual da página: topo, caixa do job (fica acima das abas), abas, painel da aba
-    : [{ id: "top", els: [$("#p-back"), ...focusables($("#p-meta"))] }, { id: "job", els: focusables($("#job")) },
+    : [{ id: "top", els: [$("#p-back"), ...focusables($("#p-meta"))] }, { id: "rec", els: focusables($("#rec-done")) }, { id: "job", els: focusables($("#job")) },
        { id: "tabs", els: [$("#tabs [aria-selected=true]")] }, ...paneZones()];
   return z.map((x) => ({ ...x, els: x.els.filter(visible) })).filter((x) => x.els.length);
 }

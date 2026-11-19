@@ -7,6 +7,7 @@ mod firstrun;
 mod launch;
 mod mods;
 mod party;
+mod record;
 mod saveimport;
 mod sync;
 
@@ -58,6 +59,9 @@ struct Config {
     games_dir: String,
     /// prod.keys do seu Switch (title.keys ao lado, se houver)
     keys_path: String,
+    /// onde ficam as gravações do "Gravar sessão" (record.rs): <record_dir>/<jogo>-<AAAAMMDD-HHMMSS>/; vazia: a padrão
+    #[serde(default)]
+    record_dir: String,
 }
 
 fn config_path() -> PathBuf {
@@ -86,6 +90,7 @@ fn default_config() -> Config {
             .unwrap_or_default()
             .to_string_lossy()
             .into(),
+        record_dir: record::default_base().to_string_lossy().into(),
     }
 }
 
@@ -93,7 +98,13 @@ fn default_config() -> Config {
 fn get_config() -> Config {
     fs::read_to_string(config_path())
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .and_then(|s| serde_json::from_str::<Config>(&s).ok())
+        .map(|mut c| {
+            if c.record_dir.trim().is_empty() {
+                c.record_dir = record::default_base().to_string_lossy().into();
+            }
+            c
+        })
         .unwrap_or_else(default_config)
 }
 
@@ -1149,7 +1160,8 @@ pub fn run() {
         .manage(Jobs::default())
         .invoke_handler(tauri::generate_handler![
             get_config, set_config, list_games, play_game, play_exit, move_mod, set_mod_enabled, import_game, rebuild_game, probe_packages, cancel_import, job_status, ensure_dir, mods_dir, check_paths, save_info,
-            restore_backup, saveimport::import_sources, saveimport::check_import, saveimport::import_save, firstrun::firstrun_status, firstrun::firstrun_run, sync::sync_save
+            restore_backup, saveimport::import_sources, saveimport::check_import, saveimport::import_save, firstrun::firstrun_status, firstrun::firstrun_run, sync::sync_save,
+            record::record_start, record::record_stop, record::record_status, record::record_note, record::record_base
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o SwitchOS Hub");

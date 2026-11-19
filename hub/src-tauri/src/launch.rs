@@ -45,6 +45,19 @@ fn record_exit(key: &str, code: Option<i32>) {
 }
 
 pub(crate) fn play(key: &str, runtime_dir: &Path, game_dir: &Path, running: Option<usize>) -> Result<u32, String> {
+    play_with(key, runtime_dir, game_dir, running, &[], |_| {})
+}
+
+/// O "Jogar" com variáveis de ambiente a mais (record.rs: a gravação da entrada e o replay do bug report) e `on_exit`,
+/// chamado na thread que espera o processo, depois de o fim ficar registrado (play_exit)
+pub(crate) fn play_with(
+    key: &str,
+    runtime_dir: &Path,
+    game_dir: &Path,
+    running: Option<usize>,
+    envs: &[(&str, &std::ffi::OsStr)],
+    on_exit: impl FnOnce(Option<i32>) + Send + 'static,
+) -> Result<u32, String> {
     if !game_dir.join("lasgame.dll").is_file() {
         return Err("o código do jogo ainda não foi compilado: use Importar".into());
     }
@@ -59,6 +72,12 @@ pub(crate) fn play(key: &str, runtime_dir: &Path, game_dir: &Path, running: Opti
         .arg("--play")
         .arg(game_dir)
         .current_dir(runtime_dir)
+        .envs(envs.iter().copied())
+        // (sem herdar a saída do hub: NUL conta como console para o runtime, que então escreve logs/play.log -
+        // a gravação o copia; um pipe herdado mandaria o log para o pipe)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|e| format!("não abriu {}: {e}", exe.display()))?;
     let pid = child.id();
@@ -68,6 +87,7 @@ pub(crate) fn play(key: &str, runtime_dir: &Path, game_dir: &Path, running: Opti
     std::thread::spawn(move || {
         let code = child.wait().ok().and_then(|s| s.code());
         record_exit(&key, code);
+        on_exit(code);
     });
     Ok(pid)
 }

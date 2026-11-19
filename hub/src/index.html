@@ -94,6 +94,7 @@
             <h1 id="p-name"></h1>
             <div class="meta" id="p-meta"></div>
             <p class="tip" id="p-tip" hidden>No jogo, F1 abre as configurações gráficas e de controles.</p>
+            <div class="save-done rec-done" id="rec-done" role="status" aria-live="polite" hidden></div>
           </div>
         </section>
 
@@ -145,6 +146,11 @@
           <small>Chaves extraídas do seu Switch (Lockpick_RCM). O <code>title.keys</code> ao lado é usado se existir.</small>
           <div class="field"><input name="keys_path" required aria-describedby="ck-keys_path" /><button class="btn" type="button" data-browse-file="keys_path">Procurar</button></div>
           <small class="check" id="ck-keys_path" data-check="keys_path" hidden></small>
+        </label>
+        <label>
+          <span>Pasta das gravações</span>
+          <small>Onde o <b>Gravar sessão</b> guarda vídeo, entrada e logs: uma subpasta por gravação.</small>
+          <div class="field"><input name="record_dir" /><button class="btn" type="button" data-browse="record_dir">Procurar</button></div>
         </label>
         <div class="save-warn" id="save-warn" role="alert" hidden>
           <span>Algum caminho acima tem problema. O hub pode não conseguir importar ou abrir os jogos.</span>
